@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:status.example.com,2005:/incidents</id>
+  <title>Example Status</title>
+  <updated>2026-06-24T12:34:56Z</updated>
+  <link rel="alternate" type="text/html" href="https://status.example.com/"/>
+  <entry>
+    <id>tag:status.example.com,2005:Incident/12345</id>
+    <published>2026-06-24T12:00:00Z</published>
+    <updated>2026-06-24T12:30:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://status.example.com/incidents/abc123"/>
+    <title>Elevated error rates on the API</title>
+    <content type="html">&lt;p&gt;&lt;small&gt;Jun 24, 12:30 UTC&lt;/small&gt;&lt;br&gt;&lt;strong&gt;Monitoring&lt;/strong&gt; - A fix has been deployed and we are monitoring the results.&lt;/p&gt;</content>
+    <summary type="html">&lt;p&gt;&lt;small&gt;Jun 24, 12:30 UTC&lt;/small&gt;&lt;br&gt;&lt;strong&gt;Monitoring&lt;/strong&gt; - A fix has been deployed and we are monitoring the results.&lt;/p&gt;</summary>
+  </entry>
+</feed>

@@ -1,8 +1,105 @@
-//! Feed-related helpers: HTML stripping and status-keyword parsing.
+//! Feed fetching, parsing, and normalization.
 //!
-//! These are pure helpers used by the feed-parsing code (added in a later
-//! task); they are factored out so they can be unit-tested without any
-//! network or notification side effects.
+//! Pure helpers (`strip_html`, `parse_status`) are factored out so they can be
+//! unit-tested without any network or notification side effects. `parse_feed`
+//! turns raw Atom/RSS into normalized [`Entry`]s, and `fetch_and_parse` wraps it
+//! with a bounded HTTP GET over a shared [`ureq::Agent`].
+
+use std::io::Read;
+
+use anyhow::Context as _;
+use chrono::{DateTime, Utc};
+
+use crate::config::Feed;
+
+/// Maximum number of bytes we will read from a feed response body. Statuspage
+/// / Instatus feeds are tiny; this cap defends against a misbehaving or
+/// malicious server trying to exhaust memory.
+const MAX_BODY_BYTES: u64 = 5 * 1024 * 1024;
+
+/// A normalized feed entry, independent of whether the source was Atom or RSS.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Entry {
+    /// Stable per-incident id (Atom `<id>`). Statuspage/Instatus keep this
+    /// constant across updates of the same incident.
+    pub id: String,
+    /// `<updated>` if present, else `<published>`. Entries with neither are
+    /// skipped during parsing (we can't age-check them).
+    pub updated: DateTime<Utc>,
+    /// Entry title (empty string if the feed omitted one).
+    pub title: String,
+    /// First link's href, if any.
+    pub link: Option<String>,
+    /// Parsed status keyword (e.g. "Monitoring"), if one was found in the
+    /// status text.
+    pub status: Option<String>,
+}
+
+/// Parse raw Atom/RSS XML into normalized [`Entry`]s.
+///
+/// `updated` falls back to `published`; entries with neither timestamp are
+/// skipped (logged at debug). The status text source prefers the entry's
+/// `<content>` body and falls back to its `<summary>`; the text is HTML-stripped
+/// before keyword extraction.
+#[allow(dead_code)]
+pub fn parse_feed(xml: &str) -> anyhow::Result<Vec<Entry>> {
+    let feed = feed_rs::parser::parse(xml.as_bytes()).context("parsing feed XML")?;
+
+    let mut entries = Vec::with_capacity(feed.entries.len());
+    for entry in feed.entries {
+        let Some(updated) = entry.updated.or(entry.published) else {
+            log::debug!(
+                "skipping feed entry with no updated/published timestamp (id={})",
+                entry.id
+            );
+            continue;
+        };
+
+        let title = entry.title.map(|t| t.content).unwrap_or_default();
+        let link = entry.links.first().map(|l| l.href.clone());
+
+        // Status text: prefer <content> body, fall back to <summary>.
+        let status_text = entry
+            .content
+            .and_then(|c| c.body)
+            .or_else(|| entry.summary.map(|s| s.content));
+        let status = status_text.and_then(|text| parse_status(&strip_html(&text)));
+
+        entries.push(Entry {
+            id: entry.id,
+            updated,
+            title,
+            link,
+            status,
+        });
+    }
+
+    Ok(entries)
+}
+
+/// Fetch a feed over the shared HTTP agent and parse it into [`Entry`]s.
+///
+/// The `agent` is built once by the caller with a global timeout and a real
+/// `User-Agent`; non-2xx responses already surface as errors via ureq's
+/// `http_status_as_error` default. The body is read through a bounded reader
+/// capped at [`MAX_BODY_BYTES`].
+#[allow(dead_code)]
+pub fn fetch_and_parse(agent: &ureq::Agent, feed: &Feed) -> anyhow::Result<Vec<Entry>> {
+    let response = agent
+        .get(&feed.url)
+        .call()
+        .with_context(|| format!("fetching feed {} ({})", feed.name, feed.url))?;
+
+    let mut body = String::new();
+    response
+        .into_body()
+        .into_reader()
+        .take(MAX_BODY_BYTES)
+        .read_to_string(&mut body)
+        .with_context(|| format!("reading feed body {} ({})", feed.name, feed.url))?;
+
+    parse_feed(&body).with_context(|| format!("parsing feed {} ({})", feed.name, feed.url))
+}
 
 /// Ordered set of status keywords. The first one (by position in the text)
 /// that matches on a word boundary wins.
@@ -182,6 +279,76 @@ mod tests {
         assert_eq!(
             parse_status("(Investigating)"),
             Some("Investigating".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_feed_extracts_expected_fields() {
+        let xml = include_str!("../tests/fixtures/sample.atom");
+        let entries = parse_feed(xml).expect("sample.atom should parse");
+        assert_eq!(entries.len(), 1);
+
+        let entry = &entries[0];
+        assert_eq!(entry.id, "tag:status.example.com,2005:Incident/12345");
+        assert_eq!(entry.title, "Elevated error rates on the API");
+        // <updated> wins over <published>.
+        assert_eq!(
+            entry.updated,
+            "2026-06-24T12:30:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(
+            entry.link.as_deref(),
+            Some("https://status.example.com/incidents/abc123")
+        );
+        assert_eq!(entry.status.as_deref(), Some("Monitoring"));
+    }
+
+    #[test]
+    fn parse_feed_extracts_status_from_content_when_summary_lacks_it() {
+        // content_only.atom has the keyword only in <content>; <summary> has none.
+        let xml = include_str!("../tests/fixtures/content_only.atom");
+        let entries = parse_feed(xml).expect("content_only.atom should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status.as_deref(), Some("Investigating"));
+    }
+
+    #[test]
+    fn parse_feed_skips_entry_without_timestamps() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:feed</id>
+  <title>No Timestamp</title>
+  <updated>2026-06-24T00:00:00Z</updated>
+  <entry>
+    <id>urn:example:entry:no-time</id>
+    <title>An entry with no timestamps</title>
+  </entry>
+</feed>"#;
+        let entries = parse_feed(xml).expect("feed should parse");
+        assert!(
+            entries.is_empty(),
+            "entry without updated/published must be skipped"
+        );
+    }
+
+    #[test]
+    fn parse_feed_uses_published_when_updated_missing() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:feed</id>
+  <title>Published Only</title>
+  <updated>2026-06-24T00:00:00Z</updated>
+  <entry>
+    <id>urn:example:entry:pub-only</id>
+    <title>Published only</title>
+    <published>2026-06-24T07:15:00Z</published>
+  </entry>
+</feed>"#;
+        let entries = parse_feed(xml).expect("feed should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].updated,
+            "2026-06-24T07:15:00Z".parse::<DateTime<Utc>>().unwrap()
         );
     }
 }

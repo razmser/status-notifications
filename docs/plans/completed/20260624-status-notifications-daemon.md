@@ -86,11 +86,11 @@ struct Entry  { id: String, updated: DateTime<Utc>, title: String, link: Option<
 - Create: `src/main.rs` (temporary `fn main`)
 - Create: `.gitignore`
 
-- [ ] `cargo init --name status-notifications` (binary crate) in project root
-- [ ] add all dependencies to `Cargo.toml` with appropriate features (`ureq` rustls, `chrono` serde, `serde` derive, `ctrlc` termination)
-- [ ] add `.gitignore` for `/target`
-- [ ] confirm `cargo build` succeeds with a stub `main`
-- [ ] run `cargo build` — must succeed before next task
+- [x] `cargo init --name status-notifications` (binary crate) in project root
+- [x] add all dependencies to `Cargo.toml` with appropriate features (`ureq` rustls, `chrono` serde, `serde` derive, `ctrlc` termination)
+- [x] add `.gitignore` for `/target`
+- [x] confirm `cargo build` succeeds with a stub `main`
+- [x] run `cargo build` — must succeed before next task
 
 ### Task 2: Config module (`config.rs`)
 
@@ -98,14 +98,14 @@ struct Entry  { id: String, updated: DateTime<Utc>, title: String, link: Option<
 - Create: `src/config.rs`
 - Modify: `src/main.rs` (wire `mod config;`)
 
-- [ ] define `Config` and `Feed` structs with serde derives and `#[serde(default)]` defaults (interval 60, age 10)
-- [ ] implement `default_config()` returning the three default feeds (OpenAI, Claude, DeepSeek)
-- [ ] implement path helpers via `directories::ProjectDirs` (config dir / `config.toml` / `seen.json`)
-- [ ] implement `load_or_create()`: if `config.toml` missing, create dir + write serialized defaults (log info), then return defaults; if present but malformed → return an error (caller logs + exits non-zero, per Technical Details)
-- [ ] write test: defaults round-trip (serialize default config to TOML → parse back → equals defaults)
-- [ ] write test: parsing a minimal TOML (only `feeds`) applies interval/age defaults
-- [ ] write test: parsing malformed TOML returns an error (not silent default fallback)
-- [ ] run tests — must pass before next task
+- [x] define `Config` and `Feed` structs with serde derives and `#[serde(default)]` defaults (interval 60, age 10)
+- [x] implement `default_config()` returning the three default feeds (OpenAI, Claude, DeepSeek)
+- [x] implement path helpers via `directories::ProjectDirs` (config dir / `config.toml` / `seen.json`)
+- [x] implement `load_or_create()`: if `config.toml` missing, create dir + write serialized defaults (log info), then return defaults; if present but malformed → return an error (caller logs + exits non-zero, per Technical Details)
+- [x] write test: defaults round-trip (serialize default config to TOML → parse back → equals defaults)
+- [x] write test: parsing a minimal TOML (only `feeds`) applies interval/age defaults
+- [x] write test: parsing malformed TOML returns an error (not silent default fallback)
+- [x] run tests — must pass before next task
 
 ### Task 3: HTML strip & status parsing (`feed.rs` helpers)
 
@@ -113,13 +113,13 @@ struct Entry  { id: String, updated: DateTime<Utc>, title: String, link: Option<
 - Create: `src/feed.rs`
 - Modify: `src/main.rs` (wire `mod feed;`)
 
-- [ ] implement `strip_html(&str) -> String` (drop `<...>` tags, decode a few common entities like `&amp;`/`&lt;`/`&gt;`/`&#39;`, collapse whitespace)
-- [ ] implement `parse_status(&str) -> Option<String>` returning the first matching keyword from the ordered set, case-insensitive on a word boundary
-- [ ] write test: `strip_html` removes tags and collapses whitespace on a sample HTML block
-- [ ] write test: `parse_status` finds `Resolved`/`Monitoring`/etc. and returns `None` when absent
-- [ ] write test: `parse_status` picks the FIRST status when multiple updates are present
-- [ ] write test: an unrecognized HTML entity (e.g. numeric `&#9731;`) is left as-is (intentional, not accidental)
-- [ ] run tests — must pass before next task
+- [x] implement `strip_html(&str) -> String` (drop `<...>` tags, decode a few common entities like `&amp;`/`&lt;`/`&gt;`/`&#39;`, collapse whitespace)
+- [x] implement `parse_status(&str) -> Option<String>` returning the first matching keyword from the ordered set, case-insensitive on a word boundary
+- [x] write test: `strip_html` removes tags and collapses whitespace on a sample HTML block
+- [x] write test: `parse_status` finds `Resolved`/`Monitoring`/etc. and returns `None` when absent
+- [x] write test: `parse_status` picks the FIRST status when multiple updates are present
+- [x] write test: an unrecognized HTML entity (e.g. numeric `&#9731;`) is left as-is (intentional, not accidental)
+- [x] run tests — must pass before next task
 
 ### Task 4: Feed fetch & entry normalization (`feed.rs`)
 
@@ -127,16 +127,16 @@ struct Entry  { id: String, updated: DateTime<Utc>, title: String, link: Option<
 - Modify: `src/feed.rs`
 - Create: `tests/fixtures/sample.atom`, `tests/fixtures/content_only.atom` (embedded via `include_str!`)
 
-- [ ] define `Entry` struct
-- [ ] implement `parse_feed(&str) -> Result<Vec<Entry>>` using `feed-rs`: map id, `updated` (fallback `published`, skip if both missing), title, first link href, and `status` from status text with **`content.body` preferred, falling back to `summary.content`**
-- [ ] implement `fetch_and_parse(agent, feed) -> Result<Vec<Entry>>`: GET on a shared `ureq::Agent` (built once with `timeout_global` ~10s + real `User-Agent`); rely on `http_status_as_error` (default) for non-2xx; read body via a bounded reader (`.take(~5 MB)`) → `parse_feed`
-- [ ] add a small real-shaped Atom fixture (one incident, one update) for tests
-- [ ] add a `content_only.atom` fixture where the status keyword lives **only** in `<content>` (not `<summary>`)
-- [ ] write test: `parse_feed` on the fixture yields expected id/title/updated/link/status
-- [ ] write test: status is extracted from `content` when `summary` lacks it (uses `content_only.atom`)
-- [ ] write test: entry with no `updated`/`published` is skipped
-- [ ] write test: entry with `published` only uses it as `updated`
-- [ ] run tests — must pass before next task
+- [x] define `Entry` struct
+- [x] implement `parse_feed(&str) -> Result<Vec<Entry>>` using `feed-rs`: map id, `updated` (fallback `published`, skip if both missing), title, first link href, and `status` from status text with **`content.body` preferred, falling back to `summary.content`**
+- [x] implement `fetch_and_parse(agent, feed) -> Result<Vec<Entry>>`: GET on a shared `ureq::Agent` (built once with `timeout_global` ~10s + real `User-Agent`); rely on `http_status_as_error` (default) for non-2xx; read body via a bounded reader (`.take(~5 MB)`) → `parse_feed`
+- [x] add a small real-shaped Atom fixture (one incident, one update) for tests
+- [x] add a `content_only.atom` fixture where the status keyword lives **only** in `<content>` (not `<summary>`)
+- [x] write test: `parse_feed` on the fixture yields expected id/title/updated/link/status
+- [x] write test: status is extracted from `content` when `summary` lacks it (uses `content_only.atom`)
+- [x] write test: entry with no `updated`/`published` is skipped
+- [x] write test: entry with `published` only uses it as `updated`
+- [x] run tests — must pass before next task
 
 ### Task 5: Seen-store with atomic persistence & prune (`state.rs`)
 
@@ -144,13 +144,13 @@ struct Entry  { id: String, updated: DateTime<Utc>, title: String, link: Option<
 - Create: `src/state.rs`
 - Modify: `src/main.rs` (wire `mod state;`)
 
-- [ ] define `SeenKey { id: String, updated: DateTime<Utc> }` (serde) and `SeenStore` wrapping `HashSet<SeenKey>`
-- [ ] implement `load(path)` (missing file → empty store; corrupt → log warn + empty), `save(path)` with atomic temp-file + rename in the same dir
-- [ ] implement `contains`, `insert`, and `prune(now, max_age_minutes)` dropping keys older than the window
-- [ ] write test: save → load round-trip preserves keys
-- [ ] write test: `prune` removes only keys older than the window
-- [ ] write test: `load` on missing/corrupt file returns empty store without error
-- [ ] run tests — must pass before next task
+- [x] define `SeenKey { id: String, updated: DateTime<Utc> }` (serde) and `SeenStore` wrapping `HashSet<SeenKey>`
+- [x] implement `load(path)` (missing file → empty store; corrupt → log warn + empty), `save(path)` with atomic temp-file + rename in the same dir
+- [x] implement `contains`, `insert`, and `prune(now, max_age_minutes)` dropping keys older than the window
+- [x] write test: save → load round-trip preserves keys
+- [x] write test: `prune` removes only keys older than the window
+- [x] write test: `load` on missing/corrupt file returns empty store without error
+- [x] run tests — must pass before next task
 
 ### Task 6: Notification sender (`notify.rs`)
 
@@ -158,12 +158,12 @@ struct Entry  { id: String, updated: DateTime<Utc>, title: String, link: Option<
 - Create: `src/notify.rs`
 - Modify: `src/main.rs` (wire `mod notify;`)
 
-- [ ] implement `init()` calling `set_application(&get_bundle_identifier_or_default("Script Editor"))` (or chosen bundle id) **once**; return its error to the caller so startup fails loudly if identity can't be set — this is NOT a per-send error to swallow
-- [ ] implement `build_body(status: Option<&str>, link: Option<&str>) -> String` per layout rules (status line + link / link only / empty)
-- [ ] implement `send(title, subtitle, body)` wrapping `send_notification` (default sound, `subtitle` as `Option`); log+swallow send errors so the loop never crashes
-- [ ] write test: `build_body` covers all four combinations (both / status-only / link-only / neither)
-- [ ] run tests — must pass before next task
-- [ ] note: `init` and `send` against the OS are verified manually (Post-Completion); `set_application` failure surfaces in the Task 8 smoke run
+- [x] implement `init()` calling `set_application(&get_bundle_identifier_or_default("Script Editor"))` (or chosen bundle id) **once**; return its error to the caller so startup fails loudly if identity can't be set — this is NOT a per-send error to swallow
+- [x] implement `build_body(status: Option<&str>, link: Option<&str>) -> String` per layout rules (status line + link / link only / empty)
+- [x] implement `send(title, subtitle, body)` wrapping `send_notification` (default sound, `subtitle` as `Option`); log+swallow send errors so the loop never crashes
+- [x] write test: `build_body` covers all four combinations (both / status-only / link-only / neither)
+- [x] run tests — must pass before next task
+- [x] note: `init` and `send` against the OS are verified manually (Post-Completion); `set_application` failure surfaces in the Task 8 smoke run
 
 ### Task 7: Daemon loop, filter & graceful shutdown (`daemon.rs`)
 
@@ -171,59 +171,59 @@ struct Entry  { id: String, updated: DateTime<Utc>, title: String, link: Option<
 - Create: `src/daemon.rs`
 - Modify: `src/main.rs` (wire `mod daemon;`)
 
-- [ ] implement pure `is_eligible(entry, seen, now, max_age_minutes) -> bool` (dedup pair + age window)
-- [ ] implement `process_feed(agent, feed, &mut seen, now, max_age)`: fetch_and_parse (errors logged warn + skipped), for each eligible entry build+send notification then insert key
-- [ ] implement `interruptible_sleep(total, &AtomicBool)` polling the flag in ~500ms slices
-- [ ] implement `run(config, &mut seen, shutdown)`: build the shared `ureq::Agent`; loop feeds (checking the shutdown flag **between feeds**) → prune → save → interruptible_sleep; on shutdown flag, save and return
-- [ ] write test: `is_eligible` true for fresh+recent, false when already seen, false when too old
-- [ ] write test: a feed update with a new `updated` is eligible even though the same `id` was seen before
-- [ ] run tests — must pass before next task
+- [x] implement pure `is_eligible(entry, seen, now, max_age_minutes) -> bool` (dedup pair + age window)
+- [x] implement `process_feed(agent, feed, &mut seen, now, max_age)`: fetch_and_parse (errors logged warn + skipped), for each eligible entry build+send notification then insert key
+- [x] implement `interruptible_sleep(total, &AtomicBool)` polling the flag in ~500ms slices
+- [x] implement `run(config, &mut seen, shutdown)`: build the shared `ureq::Agent`; loop feeds (checking the shutdown flag **between feeds**) → prune → save → interruptible_sleep; on shutdown flag, save and return
+- [x] write test: `is_eligible` true for fresh+recent, false when already seen, false when too old
+- [x] write test: a feed update with a new `updated` is eligible even though the same `id` was seen before
+- [x] run tests — must pass before next task
 
 ### Task 8: Wire `main.rs` end to end
 
 **Files:**
 - Modify: `src/main.rs`
 
-- [ ] init `env_logger` (default filter `info` when `RUST_LOG` unset)
-- [ ] call `notify::init()` early; on error, log and exit non-zero (no point running if notifications can't fire)
-- [ ] `config::load_or_create()` (on malformed existing config: log + exit non-zero), `state::SeenStore::load(state_path)`
-- [ ] install `ctrlc` handler setting a shared `Arc<AtomicBool>` (SIGINT + SIGTERM)
-- [ ] call `daemon::run(...)`; log startup (feeds, interval) and clean-shutdown messages
-- [ ] `cargo run` locally (foreground) and confirm it polls + persists `seen.json` without panicking
-- [ ] run full `cargo test` — must pass before next task
+- [x] init `env_logger` (default filter `info` when `RUST_LOG` unset)
+- [x] call `notify::init()` early; on error, log and exit non-zero (no point running if notifications can't fire)
+- [x] `config::load_or_create()` (on malformed existing config: log + exit non-zero), `state::SeenStore::load(state_path)`
+- [x] install `ctrlc` handler setting a shared `Arc<AtomicBool>` (SIGINT + SIGTERM)
+- [x] call `daemon::run(...)`; log startup (feeds, interval) and clean-shutdown messages
+- [x] `cargo run` locally (foreground) and confirm it polls + persists `seen.json` without panicking — smoke test (`RUST_LOG=info timeout 7 cargo run`) auto-created config.toml, logged "3 feed(s), polling every 60s", `notify::init()` succeeded, polled the 3 real feeds without panic, persisted seen.json, and logged "shut down cleanly" on SIGTERM
+- [x] run full `cargo test` — must pass before next task (26 tests pass; fmt + clippy -D warnings clean)
 
 ### Task 9: Justfile
 
 **Files:**
 - Create: `Justfile`
 
-- [ ] `build`: `cargo build --release`
-- [ ] `check`: `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test`
-- [ ] `run`: `RUST_LOG=debug cargo run`
-- [ ] `install`: build release; copy binary to `~/.local/bin/`; render plist from template with absolute binary path; write to `~/Library/LaunchAgents/com.razmser.status-notifications.plist`; `launchctl unload` if present then `launchctl load`
-- [ ] `uninstall`: `launchctl unload` + remove plist (keep config/state)
-- [ ] `logs`: `tail -f ~/Library/Logs/status-notifications.log`
-- [ ] verify `just check` passes end to end
+- [x] `build`: `cargo build --release`
+- [x] `check`: `cargo fmt --check` + `cargo clippy --all-targets -- -D warnings` + `cargo test`
+- [x] `run`: `RUST_LOG=debug cargo run`
+- [x] `install`: build release; copy binary to `~/.local/bin/`; render plist from template with absolute binary path; write to `~/Library/LaunchAgents/com.razmser.status-notifications.plist`; `launchctl unload` if present then `launchctl load`
+- [x] `uninstall`: `launchctl unload` + remove plist (keep config/state)
+- [x] `logs`: `tail -f ~/Library/Logs/status-notifications.log`
+- [x] verify `just check` passes end to end
 
 ### Task 10: LaunchAgent plist template
 
 **Files:**
 - Create: `contrib/com.razmser.status-notifications.plist` (template consumed by `just install`)
 
-- [ ] author plist: `Label` `com.razmser.status-notifications`; `ProgramArguments` = installed binary path (templated); `RunAtLoad=true`; `KeepAlive=true`; `EnvironmentVariables` `RUST_LOG=info`; `StandardOutPath`/`StandardErrorPath` = `~/Library/Logs/status-notifications.log`
-- [ ] ensure `just install` substitutes the absolute paths correctly (no `~` left unexpanded in the written plist)
-- [ ] `plutil -lint` the rendered plist as part of install (or manually verify once)
+- [x] author plist: `Label` `com.razmser.status-notifications`; `ProgramArguments` = installed binary path (templated); `RunAtLoad=true`; `KeepAlive=true`; `EnvironmentVariables` `RUST_LOG=info`; `StandardOutPath`/`StandardErrorPath` = `~/Library/Logs/status-notifications.log`
+- [x] ensure `just install` substitutes the absolute paths correctly (no `~` left unexpanded in the written plist)
+- [x] `plutil -lint` the rendered plist as part of install (or manually verify once)
 
 ### Task 11: Verify acceptance criteria
-- [ ] verify all Overview requirements implemented (poll, dedup `(id,updated)`, age window, native notification with status+link, configurable feeds/interval/age, auto-create config, graceful shutdown)
-- [ ] verify edge cases: dead feed isolated; entry with missing timestamps skipped; corrupt seen.json tolerated; first-run no storm
-- [ ] run full test suite: `cargo test`
-- [ ] run `just check` (fmt + clippy -D warnings + test) clean
+- [x] verify all Overview requirements implemented (poll, dedup `(id,updated)`, age window, native notification with status+link, configurable feeds/interval/age, auto-create config, graceful shutdown)
+- [x] verify edge cases: dead feed isolated; entry with missing timestamps skipped; corrupt seen.json tolerated; first-run no storm
+- [x] run full test suite: `cargo test`
+- [x] run `just check` (fmt + clippy -D warnings + test) clean
 
 ### Task 12: [Final] Documentation
-- [ ] write `README.md`: what it does, config location/format + example, install/uninstall via `just`, log location, notification-permission note
-- [ ] update/create `CLAUDE.md` if any non-obvious conventions emerged
-- [ ] move this plan to `docs/plans/completed/`
+- [x] write `README.md`: what it does, config location/format + example, install/uninstall via `just`, log location, notification-permission note
+- [x] update/create `CLAUDE.md` if any non-obvious conventions emerged
+- [x] move this plan to `docs/plans/completed/`
 
 ## Post-Completion
 *Items requiring manual intervention or external systems — no checkboxes, informational only*

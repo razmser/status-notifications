@@ -4,6 +4,8 @@
 mod config;
 #[allow(dead_code)]
 mod feed;
+#[allow(dead_code)]
+mod state;
 
 fn main() {
     // Stub entry point; wired up in later tasks.

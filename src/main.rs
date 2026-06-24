@@ -1,6 +1,5 @@
 mod config;
 mod daemon;
-mod doh;
 mod feed;
 mod notify;
 mod state;

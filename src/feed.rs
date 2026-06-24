@@ -3,19 +3,17 @@
 //! Pure helpers (`strip_html`, `parse_status`) are factored out so they can be
 //! unit-tested without any network or notification side effects. `parse_feed`
 //! turns raw Atom/RSS into normalized [`Entry`]s, and `fetch_and_parse` wraps it
-//! with a bounded HTTP GET over a shared [`ureq::Agent`].
-
-use std::io::Read;
+//! with a bounded HTTP GET over a shared browser-emulating [`wreq::Client`].
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
 
 use crate::config::Feed;
 
-/// Maximum number of bytes we will read from a feed response body. Statuspage
-/// / Instatus feeds are tiny; this cap defends against a misbehaving or
-/// malicious server trying to exhaust memory.
-const MAX_BODY_BYTES: u64 = 5 * 1024 * 1024;
+/// Maximum number of bytes we keep from a feed response body. Statuspage /
+/// Instatus feeds are tiny; this cap defends against a misbehaving or malicious
+/// server trying to exhaust memory.
+const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
 
 /// A normalized feed entry, independent of whether the source was Atom or RSS.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,28 +94,40 @@ pub fn parse_feed(xml: &[u8], base_uri: &str) -> anyhow::Result<Vec<Entry>> {
     Ok(entries)
 }
 
-/// Fetch a feed over the shared HTTP agent and parse it into [`Entry`]s.
+/// Fetch a feed over the shared browser-emulating client and parse it into
+/// [`Entry`]s.
 ///
-/// The `agent` is built once by the caller with a global timeout and a real
-/// `User-Agent`; non-2xx responses already surface as errors via ureq's
-/// `http_status_as_error` default. The body is read as raw bytes through a
-/// bounded reader capped at [`MAX_BODY_BYTES`], so non-UTF-8 feeds (which
-/// declare their encoding in the XML prolog) parse correctly.
-pub fn fetch_and_parse(agent: &ureq::Agent, feed: &Feed) -> anyhow::Result<Vec<Entry>> {
-    let response = agent
-        .get(&feed.url)
-        .call()
-        .with_context(|| format!("fetching feed {} ({})", feed.name, feed.url))?;
+/// The `client` is built once by the caller with a browser TLS/HTTP2 fingerprint
+/// (some status hosts reset non-browser TLS handshakes); the async request is
+/// driven to completion on the caller's `runtime`. Non-2xx responses are turned
+/// into errors via `error_for_status`. The body is read as raw bytes (capped at
+/// [`MAX_BODY_BYTES`]) so non-UTF-8 feeds — which declare their encoding in the
+/// XML prolog — parse correctly.
+pub fn fetch_and_parse(
+    client: &wreq::Client,
+    runtime: &tokio::runtime::Runtime,
+    feed: &Feed,
+) -> anyhow::Result<Vec<Entry>> {
+    let body = runtime.block_on(async {
+        let response = client
+            .get(&feed.url)
+            .send()
+            .await
+            .with_context(|| format!("fetching feed {} ({})", feed.name, feed.url))?
+            .error_for_status()
+            .with_context(|| format!("feed {} returned an error status", feed.name))?;
 
-    let mut body = Vec::new();
-    response
-        .into_body()
-        .into_reader()
-        .take(MAX_BODY_BYTES)
-        .read_to_end(&mut body)
-        .with_context(|| format!("reading feed body {} ({})", feed.name, feed.url))?;
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("reading feed body {} ({})", feed.name, feed.url))?;
+        anyhow::Ok(bytes)
+    })?;
 
-    parse_feed(&body, &feed.url)
+    // Defensive cap: keep at most MAX_BODY_BYTES before handing to the parser.
+    let body = &body[..body.len().min(MAX_BODY_BYTES)];
+
+    parse_feed(body, &feed.url)
         .with_context(|| format!("parsing feed {} ({})", feed.name, feed.url))
 }
 

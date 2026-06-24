@@ -3,8 +3,9 @@
 //! [`is_eligible`] is a pure filter (dedup `(id, updated)` pair + age window) so
 //! it can be unit-tested without any network or notification side effects.
 //! [`process_feed`] fetches one feed and notifies on eligible entries, isolating
-//! per-feed failures. [`run`] owns the shared HTTP agent and drives the loop,
-//! honoring the shutdown flag between feeds and during the inter-tick sleep.
+//! per-feed failures. [`run`] owns the shared HTTP client and tokio runtime and
+//! drives the loop, honoring the shutdown flag between feeds and during the
+//! inter-tick sleep.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,9 +20,6 @@ use crate::state::{SeenKey, SeenStore};
 
 /// Global HTTP timeout for a feed fetch.
 const HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(10);
-
-/// `User-Agent` header sent on every feed request.
-const USER_AGENT: &str = concat!("status-notifications/", env!("CARGO_PKG_VERSION"));
 
 /// Sleep granularity for [`interruptible_sleep`]: poll the shutdown flag this
 /// often so a shutdown is observed promptly without busy-waiting.
@@ -59,13 +57,14 @@ pub fn is_eligible(
 /// recorded so it won't fire again. A failed send leaves the entry unseen so it
 /// is retried on the next tick (while still within the age window).
 fn process_feed(
-    agent: &ureq::Agent,
+    client: &wreq::Client,
+    runtime: &tokio::runtime::Runtime,
     feed: &Feed,
     seen: &mut SeenStore,
     now: DateTime<Utc>,
     max_age_minutes: i64,
 ) {
-    let entries = match fetch_and_parse(agent, feed) {
+    let entries = match fetch_and_parse(client, runtime, feed) {
         Ok(entries) => entries,
         Err(err) => {
             log::warn!("skipping feed {} ({}): {err:#}", feed.name, feed.url);
@@ -105,27 +104,42 @@ fn interruptible_sleep(total: StdDuration, shutdown: &AtomicBool) {
 
 /// Run the poll loop until `shutdown` is set.
 ///
-/// Builds the shared [`ureq::Agent`] once (global timeout + real `User-Agent`),
-/// then on each tick polls every feed in turn — checking `shutdown` before and
-/// between feeds so a hung fetch can't stretch shutdown to `feeds × timeout` —
-/// prunes and persists the seen-store, and sleeps interruptibly until the next
-/// tick. A final `save` is always performed before returning on shutdown.
+/// Builds, once, a single-threaded tokio runtime plus a shared browser-emulating
+/// [`wreq::Client`] (some status hosts reset non-browser TLS handshakes). Then on
+/// each tick it polls every feed in turn — checking `shutdown` before and between
+/// feeds so a hung fetch can't stretch shutdown to `feeds × timeout` — prunes and
+/// persists the seen-store, and sleeps interruptibly until the next tick. A final
+/// `save` is always performed before returning on shutdown.
+///
+/// If the runtime or client can't be built the daemon can't fetch anything, so we
+/// log and return (a clean exit; launchd will relaunch).
 pub fn run(config: &Config, seen: &mut SeenStore, seen_path: &Path, shutdown: &AtomicBool) {
-    let ureq_config = ureq::Agent::config_builder()
-        .timeout_global(Some(HTTP_TIMEOUT))
-        .user_agent(USER_AGENT)
-        .build();
-    let agent: ureq::Agent = match config.doh_endpoint() {
-        Some(endpoint) => {
-            log::info!("resolving feed hostnames via DNS-over-HTTPS ({endpoint})");
-            ureq::Agent::with_parts(
-                ureq_config,
-                ureq::unversioned::transport::DefaultConnector::default(),
-                crate::doh::DohResolver::new(endpoint),
-            )
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            log::error!("could not start async runtime: {err:#}");
+            return;
         }
-        None => ureq_config.into(),
     };
+
+    let client = match wreq::Client::builder()
+        .emulation(config.tls_emulation)
+        .timeout(HTTP_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(err) => {
+            log::error!("could not build HTTP client: {err:#}");
+            return;
+        }
+    };
+    log::info!(
+        "fetching feeds with {:?} TLS emulation",
+        config.tls_emulation
+    );
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -138,7 +152,7 @@ pub fn run(config: &Config, seen: &mut SeenStore, seen_path: &Path, shutdown: &A
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            process_feed(&agent, feed, seen, now, config.max_age_minutes);
+            process_feed(&client, &runtime, feed, seen, now, config.max_age_minutes);
         }
 
         seen.prune(now, config.max_age_minutes);

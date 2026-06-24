@@ -5,6 +5,8 @@ mod config;
 #[allow(dead_code)]
 mod feed;
 #[allow(dead_code)]
+mod notify;
+#[allow(dead_code)]
 mod state;
 
 fn main() {

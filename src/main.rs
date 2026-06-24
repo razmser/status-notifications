@@ -3,6 +3,8 @@
 #[allow(dead_code)]
 mod config;
 #[allow(dead_code)]
+mod daemon;
+#[allow(dead_code)]
 mod feed;
 #[allow(dead_code)]
 mod notify;

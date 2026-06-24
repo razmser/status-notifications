@@ -14,6 +14,7 @@ fn default_max_age_minutes() -> i64 {
 
 /// A single status-page feed to poll.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Feed {
     pub name: String,
     pub url: String,
@@ -21,6 +22,7 @@ pub struct Feed {
 
 /// Daemon configuration loaded from `config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default = "default_poll_interval_secs")]
     pub poll_interval_secs: u64,
@@ -73,6 +75,35 @@ pub fn seen_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("seen.json"))
 }
 
+/// Upper bound for `max_age_minutes`: one year (525_600 minutes). Far larger
+/// than any sane age window, and small enough that `chrono::Duration::minutes`
+/// and the `now - duration` arithmetic at the call sites can never overflow.
+const MAX_AGE_MINUTES_CAP: i64 = 525_600;
+
+/// Validate a loaded (user-authored) config (consistent with the
+/// malformed-config-exits design).
+///
+/// - `poll_interval_secs` of 0 would busy-loop the poll loop, hammering feeds.
+/// - `max_age_minutes < 1` would make every normal entry ineligible (the daemon
+///   would run but never notify), and an extreme value would overflow
+///   `chrono::Duration::minutes` at the call sites, so it must stay in
+///   `1..=MAX_AGE_MINUTES_CAP`.
+fn validate(config: &Config) -> Result<()> {
+    if config.poll_interval_secs == 0 {
+        anyhow::bail!(
+            "poll_interval_secs must be >= 1 (got {})",
+            config.poll_interval_secs
+        );
+    }
+    if config.max_age_minutes < 1 || config.max_age_minutes > MAX_AGE_MINUTES_CAP {
+        anyhow::bail!(
+            "max_age_minutes must be between 1 and {MAX_AGE_MINUTES_CAP} (got {})",
+            config.max_age_minutes
+        );
+    }
+    Ok(())
+}
+
 /// Load the config from `config.toml`, creating it with defaults if missing.
 ///
 /// - Missing file: create the config dir, write serialized defaults, return defaults.
@@ -84,6 +115,7 @@ pub fn load_or_create() -> Result<Config> {
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
         let config: Config = toml::from_str(&contents)
             .with_context(|| format!("failed to parse config file: {}", path.display()))?;
+        validate(&config).with_context(|| format!("invalid config file: {}", path.display()))?;
         Ok(config)
     } else {
         let dir = config_dir()?;
@@ -130,5 +162,83 @@ mod tests {
         let toml_str = "this is = = not valid toml [[[";
         let result: Result<Config, _> = toml::from_str(toml_str);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn unknown_key_returns_error() {
+        // A typo in a known key (missing trailing 's') must NOT be silently
+        // ignored and fall back to the default — it must fail to parse loudly.
+        let toml_str = r#"
+            max_age_minute = 5
+            [[feeds]]
+            name = "OpenAI"
+            url = "https://status.openai.com/feed.atom"
+        "#;
+        let result: Result<Config, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown config key must cause a parse error, not a silent default"
+        );
+    }
+
+    #[test]
+    fn unknown_feed_key_returns_error() {
+        let toml_str = r#"
+            [[feeds]]
+            name = "OpenAI"
+            url = "https://status.openai.com/feed.atom"
+            unexpected = "x"
+        "#;
+        let result: Result<Config, _> = toml::from_str(toml_str);
+        assert!(
+            result.is_err(),
+            "unknown feed key must cause a parse error, not be silently ignored"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_poll_interval() {
+        let mut config = default_config();
+        config.poll_interval_secs = 0;
+        assert!(
+            validate(&config).is_err(),
+            "poll_interval_secs == 0 must be rejected (would busy-loop)"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_default_config() {
+        // The default interval (60) and max_age_minutes (10) must remain valid.
+        assert!(validate(&default_config()).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_max_age_minutes() {
+        let mut config = default_config();
+        config.max_age_minutes = 0;
+        assert!(
+            validate(&config).is_err(),
+            "max_age_minutes == 0 must be rejected (would never notify)"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_negative_max_age_minutes() {
+        let mut config = default_config();
+        config.max_age_minutes = -1;
+        assert!(
+            validate(&config).is_err(),
+            "negative max_age_minutes must be rejected (would never notify)"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_max_age_minutes_above_cap() {
+        let mut config = default_config();
+        config.max_age_minutes = MAX_AGE_MINUTES_CAP + 1;
+        assert!(
+            validate(&config).is_err(),
+            "max_age_minutes above the cap must be rejected (overflow guard)"
+        );
     }
 }

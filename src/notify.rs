@@ -10,13 +10,17 @@ use mac_notification_sys::{
     Notification, Sound, get_bundle_identifier_or_default, send_notification,
 };
 
+/// System application whose bundle id is borrowed for the notification source
+/// identity, so banners have a valid identity without shipping a signed `.app`.
+const BUNDLE_APP_NAME: &str = "Script Editor";
+
 /// Set the source-application identity for delivered notifications.
 ///
 /// Must be called once before any [`send`]. Borrows a system bundle id (Script
 /// Editor) so notifications have a valid identity without shipping a signed
 /// `.app`. Returns an error so startup can fail loudly if identity can't be set.
 pub fn init() -> anyhow::Result<()> {
-    let bundle = get_bundle_identifier_or_default("Script Editor");
+    let bundle = get_bundle_identifier_or_default(BUNDLE_APP_NAME);
     mac_notification_sys::set_application(&bundle)
         .with_context(|| format!("failed to set notification application identity to {bundle:?}"))
 }
@@ -40,9 +44,11 @@ pub fn build_body(status: Option<&str>, link: Option<&str>) -> String {
 /// Deliver a single native notification.
 ///
 /// `title` is the feed name, `subtitle` the entry title, `body` the status/link
-/// block. Plays the default system sound. Delivery errors are logged and
-/// swallowed so a failing send never propagates into the poll loop.
-pub fn send(title: &str, subtitle: &str, body: &str) {
+/// block. Plays the default system sound. Returns `true` if delivery succeeded
+/// and `false` if it failed. Delivery errors are logged and swallowed (never
+/// panic/propagate) so a failing send can't crash the poll loop; the returned
+/// `bool` lets the caller decide whether to mark the entry as seen.
+pub fn send(title: &str, subtitle: &str, body: &str) -> bool {
     let mut notification = Notification::new();
     notification.sound(Sound::Default);
 
@@ -52,8 +58,12 @@ pub fn send(title: &str, subtitle: &str, body: &str) {
         Some(subtitle)
     };
 
-    if let Err(e) = send_notification(title, subtitle, body, Some(&notification)) {
-        log::warn!("failed to send notification {title:?}: {e}");
+    match send_notification(title, subtitle, body, Some(&notification)) {
+        Ok(_) => true,
+        Err(e) => {
+            log::warn!("failed to send notification {title:?}: {e}");
+            false
+        }
     }
 }
 

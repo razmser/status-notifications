@@ -65,10 +65,11 @@ url = "https://status.deepseek.com/feed.atom"
 ### Fields
 
 - `poll_interval_secs` (default `60`) — how often, in seconds, every feed is
-  polled.
+  polled. Must be `>= 1`.
 - `max_age_minutes` (default `10`) — only entries updated within this many
   minutes are eligible to notify. Larger values mean older incidents can still
-  fire a banner (useful for testing); smaller values keep things tight.
+  fire a banner (useful for testing); smaller values keep things tight. Must be
+  between `1` and `525600` (one year).
 - `[[feeds]]` — one block per feed, each with:
   - `name` — shown as the notification title.
   - `url` — the Atom or RSS feed URL of the status page.
@@ -91,9 +92,10 @@ To stop tracking one, delete its block. Restart the daemon after editing the
 config (`just uninstall` then `just install`, or relaunch the foreground
 process) so the changes take effect.
 
-If `config.toml` exists but fails to parse, the daemon logs the error and exits
-non-zero rather than silently falling back to defaults — fix the typo and start
-it again.
+If `config.toml` exists but fails to parse — malformed TOML, an unknown or
+misspelled key (e.g. `max_age_minute` instead of `max_age_minutes`), or a value
+outside the valid ranges above — the daemon logs the error and exits non-zero
+rather than silently falling back to defaults. Fix the typo and start it again.
 
 ### Log verbosity
 
@@ -107,8 +109,8 @@ installed LaunchAgent runs with `RUST_LOG=info`.
 Using `just` (run from the repo root):
 
 - `just build` — build the release binary (`cargo build --release`).
-- `just check` — `cargo fmt --check`, `cargo clippy -D warnings`, and the test
-  suite. Use this to verify a clean tree.
+- `just check` — `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`,
+  and the test suite. Use this to verify a clean tree.
 - `just run` — run in the **foreground** with debug logging, for testing. Stop
   with Ctrl-C; it shuts down cleanly and saves state.
 - `just install` — build the release binary, copy it to `~/.local/bin/`, render

@@ -41,8 +41,21 @@ pub struct Entry {
 /// skipped (logged at debug). The status text source prefers the entry's
 /// `<content>` body and falls back to its `<summary>`; the text is HTML-stripped
 /// before keyword extraction.
-pub fn parse_feed(xml: &str) -> anyhow::Result<Vec<Entry>> {
-    let feed = feed_rs::parser::parse(xml.as_bytes()).context("parsing feed XML")?;
+pub fn parse_feed(xml: &[u8], base_uri: &str) -> anyhow::Result<Vec<Entry>> {
+    // feed-rs reads from any `Read` and honors the encoding declared in the XML
+    // prolog, so we hand it raw bytes rather than requiring valid UTF-8.
+    //
+    // The feed's own URL is passed as the base URI so feed-rs's id generator is
+    // deterministic across polls: for entries that lack an explicit <id>/<guid>,
+    // feed-rs synthesizes one by hashing entry content together with the base
+    // URI. Without a stable base URI those synthetic ids could change between
+    // polls, breaking the (id, updated) dedup key and re-notifying the same
+    // entry. (Our default Statuspage/Instatus feeds have explicit <id>s and are
+    // unaffected; this hardens user-added feeds.)
+    let parser = feed_rs::parser::Builder::new()
+        .base_uri(Some(base_uri))
+        .build();
+    let feed = parser.parse(xml).context("parsing feed XML")?;
 
     let mut entries = Vec::with_capacity(feed.entries.len());
     for entry in feed.entries {
@@ -55,7 +68,14 @@ pub fn parse_feed(xml: &str) -> anyhow::Result<Vec<Entry>> {
         };
 
         let title = entry.title.map(|t| t.content).unwrap_or_default();
-        let link = entry.links.first().map(|l| l.href.clone());
+        // Prefer the canonical `rel="alternate"` link (the human-facing incident
+        // page), falling back to the first link of any rel.
+        let link = entry
+            .links
+            .iter()
+            .find(|l| l.rel.as_deref() == Some("alternate"))
+            .or_else(|| entry.links.first())
+            .map(|l| l.href.clone());
 
         // Status text: prefer <content> body, fall back to <summary>.
         let status_text = entry
@@ -80,23 +100,25 @@ pub fn parse_feed(xml: &str) -> anyhow::Result<Vec<Entry>> {
 ///
 /// The `agent` is built once by the caller with a global timeout and a real
 /// `User-Agent`; non-2xx responses already surface as errors via ureq's
-/// `http_status_as_error` default. The body is read through a bounded reader
-/// capped at [`MAX_BODY_BYTES`].
+/// `http_status_as_error` default. The body is read as raw bytes through a
+/// bounded reader capped at [`MAX_BODY_BYTES`], so non-UTF-8 feeds (which
+/// declare their encoding in the XML prolog) parse correctly.
 pub fn fetch_and_parse(agent: &ureq::Agent, feed: &Feed) -> anyhow::Result<Vec<Entry>> {
     let response = agent
         .get(&feed.url)
         .call()
         .with_context(|| format!("fetching feed {} ({})", feed.name, feed.url))?;
 
-    let mut body = String::new();
+    let mut body = Vec::new();
     response
         .into_body()
         .into_reader()
         .take(MAX_BODY_BYTES)
-        .read_to_string(&mut body)
+        .read_to_end(&mut body)
         .with_context(|| format!("reading feed body {} ({})", feed.name, feed.url))?;
 
-    parse_feed(&body).with_context(|| format!("parsing feed {} ({})", feed.name, feed.url))
+    parse_feed(&body, &feed.url)
+        .with_context(|| format!("parsing feed {} ({})", feed.name, feed.url))
 }
 
 /// Ordered set of status keywords. The first one (by position in the text)
@@ -216,6 +238,11 @@ fn is_word_byte(b: u8) -> bool {
 mod tests {
     use super::*;
 
+    /// Representative feed URL used as the feed-rs base URI in parse tests. All
+    /// fixtures carry explicit `<id>`s, so the base URI does not affect their
+    /// parsed ids.
+    const TEST_BASE_URI: &str = "https://status.example.com/feed.atom";
+
     #[test]
     fn strip_html_removes_tags_and_collapses_whitespace() {
         let html = "<p>Hello   <b>world</b>\n\n &amp; goodbye</p>";
@@ -280,8 +307,8 @@ mod tests {
 
     #[test]
     fn parse_feed_extracts_expected_fields() {
-        let xml = include_str!("../tests/fixtures/sample.atom");
-        let entries = parse_feed(xml).expect("sample.atom should parse");
+        let xml = include_bytes!("../tests/fixtures/sample.atom");
+        let entries = parse_feed(xml, TEST_BASE_URI).expect("sample.atom should parse");
         assert_eq!(entries.len(), 1);
 
         let entry = &entries[0];
@@ -300,10 +327,53 @@ mod tests {
     }
 
     #[test]
+    fn strip_html_passes_bare_ampersand_verbatim() {
+        // A bare '&' (not the start of a recognized entity) must pass through
+        // verbatim without panicking.
+        assert_eq!(strip_html("a & b"), "a & b");
+        assert_eq!(strip_html("ends with &"), "ends with &");
+    }
+
+    #[test]
+    fn parse_status_handles_non_ascii_before_keyword() {
+        // A multi-byte char immediately preceding the keyword is a valid word
+        // boundary and must not corrupt byte-index handling.
+        assert_eq!(parse_status("café Resolved"), Some("Resolved".to_string()));
+    }
+
+    #[test]
+    fn parse_feed_prefers_content_over_summary_status() {
+        // content_wins.atom: <content> says "Resolved", <summary> says
+        // "Investigating". Content must win.
+        let xml = include_bytes!("../tests/fixtures/content_wins.atom");
+        let entries = parse_feed(xml, TEST_BASE_URI).expect("content_wins.atom should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status.as_deref(), Some("Resolved"));
+    }
+
+    #[test]
+    fn parse_feed_handles_missing_title_and_link() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:feed</id>
+  <title>No Title Or Link</title>
+  <updated>2026-06-24T00:00:00Z</updated>
+  <entry>
+    <id>urn:example:entry:bare</id>
+    <updated>2026-06-24T07:15:00Z</updated>
+  </entry>
+</feed>"#;
+        let entries = parse_feed(xml.as_bytes(), TEST_BASE_URI).expect("feed should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title, "");
+        assert_eq!(entries[0].link, None);
+    }
+
+    #[test]
     fn parse_feed_extracts_status_from_content_when_summary_lacks_it() {
         // content_only.atom has the keyword only in <content>; <summary> has none.
-        let xml = include_str!("../tests/fixtures/content_only.atom");
-        let entries = parse_feed(xml).expect("content_only.atom should parse");
+        let xml = include_bytes!("../tests/fixtures/content_only.atom");
+        let entries = parse_feed(xml, TEST_BASE_URI).expect("content_only.atom should parse");
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].status.as_deref(), Some("Investigating"));
     }
@@ -320,10 +390,37 @@ mod tests {
     <title>An entry with no timestamps</title>
   </entry>
 </feed>"#;
-        let entries = parse_feed(xml).expect("feed should parse");
+        let entries = parse_feed(xml.as_bytes(), TEST_BASE_URI).expect("feed should parse");
         assert!(
             entries.is_empty(),
             "entry without updated/published must be skipped"
+        );
+    }
+
+    #[test]
+    fn parse_feed_generates_stable_id_for_idless_entry() {
+        // An Atom entry with no <id>: feed-rs synthesizes one by hashing the
+        // entry content together with the base URI. Parsing twice with the same
+        // base URI must yield the same synthetic id, otherwise the (id, updated)
+        // dedup key would churn and re-notify the same entry every poll.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>urn:example:feed</id>
+  <title>No Entry Id</title>
+  <updated>2026-06-24T00:00:00Z</updated>
+  <entry>
+    <title>Investigating an outage</title>
+    <updated>2026-06-24T07:15:00Z</updated>
+  </entry>
+</feed>"#;
+        let first = parse_feed(xml.as_bytes(), TEST_BASE_URI).expect("feed should parse");
+        let second = parse_feed(xml.as_bytes(), TEST_BASE_URI).expect("feed should parse");
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert!(!first[0].id.is_empty());
+        assert_eq!(
+            first[0].id, second[0].id,
+            "synthetic id must be stable across polls with the same base URI"
         );
     }
 
@@ -340,7 +437,7 @@ mod tests {
     <published>2026-06-24T07:15:00Z</published>
   </entry>
 </feed>"#;
-        let entries = parse_feed(xml).expect("feed should parse");
+        let entries = parse_feed(xml.as_bytes(), TEST_BASE_URI).expect("feed should parse");
         assert_eq!(entries.len(), 1);
         assert_eq!(
             entries[0].updated,

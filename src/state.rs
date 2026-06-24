@@ -79,7 +79,9 @@ impl SeenStore {
         };
         let serialized = serde_json::to_string(&file).context("failed to serialize seen-store")?;
 
-        let tmp_path = path.with_extension("json.tmp");
+        // Unique temp name (pid) so two concurrent writers can't collide on a
+        // fixed name; still in the same dir so the rename stays atomic.
+        let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
         std::fs::write(&tmp_path, serialized)
             .with_context(|| format!("failed to write temp state file: {}", tmp_path.display()))?;
         std::fs::rename(&tmp_path, path).with_context(|| {
@@ -110,15 +112,17 @@ impl SeenStore {
         let cutoff = now - Duration::minutes(max_age_minutes);
         self.seen.retain(|key| key.updated >= cutoff);
     }
+}
 
-    /// Number of keys currently held (test/diagnostic helper).
-    #[allow(dead_code)]
+/// Test-only accessors, kept out of the production surface.
+#[cfg(test)]
+impl SeenStore {
+    /// Number of keys currently held.
     pub fn len(&self) -> usize {
         self.seen.len()
     }
 
-    /// Whether the store holds no keys (test/diagnostic helper).
-    #[allow(dead_code)]
+    /// Whether the store holds no keys.
     pub fn is_empty(&self) -> bool {
         self.seen.is_empty()
     }
@@ -191,6 +195,29 @@ mod tests {
 
         let store = SeenStore::load(&path);
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn save_creates_missing_parent_directory() {
+        // Save into a path under a non-existent subdir of a unique temp dir.
+        let base = unique_temp_path(); // a unique *.json path; reuse as a dir stem
+        let dir = base.with_extension("d").join("nested");
+        let path = dir.join("seen.json");
+        assert!(!dir.exists());
+
+        let now = Utc::now();
+        let mut store = SeenStore::default();
+        store.insert(key("incident-1", now));
+        store
+            .save(&path)
+            .expect("save should create missing parents");
+
+        let loaded = SeenStore::load(&path);
+        assert_eq!(loaded.len(), 1);
+        assert!(loaded.contains(&key("incident-1", now)));
+
+        // Clean up the whole created tree.
+        std::fs::remove_dir_all(base.with_extension("d")).ok();
     }
 
     #[test]

@@ -27,6 +27,14 @@ const USER_AGENT: &str = concat!("status-notifications/", env!("CARGO_PKG_VERSIO
 /// often so a shutdown is observed promptly without busy-waiting.
 const SLEEP_SLICE: StdDuration = StdDuration::from_millis(500);
 
+/// Build the dedup [`SeenKey`] for an entry's `(id, updated)` pair.
+fn seen_key(entry: &Entry) -> SeenKey {
+    SeenKey {
+        id: entry.id.clone(),
+        updated: entry.updated,
+    }
+}
+
 /// Whether `entry` should trigger a notification right now.
 ///
 /// Pure function of the seen-set and the age window: notify only if the
@@ -40,19 +48,16 @@ pub fn is_eligible(
     now: DateTime<Utc>,
     max_age_minutes: i64,
 ) -> bool {
-    let key = SeenKey {
-        id: entry.id.clone(),
-        updated: entry.updated,
-    };
-    !seen.contains(&key) && entry.updated >= now - Duration::minutes(max_age_minutes)
+    !seen.contains(&seen_key(entry)) && entry.updated >= now - Duration::minutes(max_age_minutes)
 }
 
 /// Fetch and process a single feed, notifying on each eligible entry.
 ///
 /// Fetch/parse errors are logged at `warn` and swallowed so one dead feed never
 /// crashes the loop or blocks the others. For every eligible entry a
-/// notification is sent and its `(id, updated)` key recorded so it won't fire
-/// again.
+/// notification is sent and, only if delivery succeeded, its `(id, updated)` key
+/// recorded so it won't fire again. A failed send leaves the entry unseen so it
+/// is retried on the next tick (while still within the age window).
 fn process_feed(
     agent: &ureq::Agent,
     feed: &Feed,
@@ -74,12 +79,11 @@ fn process_feed(
         }
 
         let body = notify::build_body(entry.status.as_deref(), entry.link.as_deref());
-        notify::send(&feed.name, &entry.title, &body);
-
-        seen.insert(SeenKey {
-            id: entry.id,
-            updated: entry.updated,
-        });
+        // Only record the entry as seen if delivery actually succeeded; a
+        // transient send failure must not permanently suppress this update.
+        if notify::send(&feed.name, &entry.title, &body) {
+            seen.insert(seen_key(&entry));
+        }
     }
 }
 
@@ -186,6 +190,19 @@ mod tests {
         });
 
         assert!(!is_eligible(&e, &seen, now, 10));
+    }
+
+    #[test]
+    fn is_eligible_true_at_exact_age_boundary() {
+        let now = Utc::now();
+        let seen = SeenStore::default();
+        // Exactly at the window edge: updated == now - max_age. The `>=` in the
+        // age check must treat this as eligible.
+        let e = entry("incident-1", now - Duration::minutes(10));
+        assert!(
+            is_eligible(&e, &seen, now, 10),
+            "entry exactly at the age boundary must be eligible"
+        );
     }
 
     #[test]

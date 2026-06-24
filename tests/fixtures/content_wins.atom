@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:status.example.com,2005:/incidents</id>
+  <title>Example Status</title>
+  <updated>2026-06-24T12:34:56Z</updated>
+  <link rel="alternate" type="text/html" href="https://status.example.com/"/>
+  <entry>
+    <id>tag:status.example.com,2005:Incident/67890</id>
+    <published>2026-06-24T12:00:00Z</published>
+    <updated>2026-06-24T12:30:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://status.example.com/incidents/def456"/>
+    <title>Database latency</title>
+    <content type="html">&lt;p&gt;&lt;strong&gt;Resolved&lt;/strong&gt; - The issue is fixed.&lt;/p&gt;</content>
+    <summary type="html">&lt;p&gt;&lt;strong&gt;Investigating&lt;/strong&gt; - We are looking into reports.&lt;/p&gt;</summary>
+  </entry>
+</feed>

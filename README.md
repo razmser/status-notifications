@@ -70,12 +70,24 @@ url = "https://status.deepseek.com/feed.atom"
   minutes are eligible to notify. Larger values mean older incidents can still
   fire a banner (useful for testing); smaller values keep things tight. Must be
   between `1` and `525600` (one year).
+- `doh` (optional) — resolve feed hostnames over **DNS-over-HTTPS** instead of
+  the system resolver. Set `doh = true` to use the default endpoint
+  (Cloudflare `https://1.1.1.1/dns-query`), or `doh = "https://host/dns-query"`
+  to point at any DoH-JSON resolver (e.g. `https://8.8.8.8/resolve`). The
+  endpoint is reached by IP, so the lookup works even when the system DNS is
+  hijacked (e.g. a fake-IP VPN that maps every name to an unroutable
+  `198.18.x.x`). TLS still validates the original hostname, so this only changes
+  how names are resolved — not what is connected to. Omit the key (the default)
+  to use the system resolver. Note: DoH fixes *DNS* hijacking only; a host that
+  is unreachable or blocked at the TCP/TLS layer (e.g. geo-blocked) will still
+  fail even with the correct IP.
 - `[[feeds]]` — one block per feed, each with:
   - `name` — shown as the notification title.
   - `url` — the Atom or RSS feed URL of the status page.
 
-Both `poll_interval_secs` and `max_age_minutes` are optional and fall back to
-their defaults if omitted; only `feeds` really needs to be present.
+`poll_interval_secs`, `max_age_minutes`, and `doh` are all optional and fall
+back to their defaults (system resolver, no DoH) if omitted; only `feeds` really
+needs to be present.
 
 ### Adding or removing feeds
 

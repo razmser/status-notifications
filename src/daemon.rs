@@ -111,11 +111,21 @@ fn interruptible_sleep(total: StdDuration, shutdown: &AtomicBool) {
 /// prunes and persists the seen-store, and sleeps interruptibly until the next
 /// tick. A final `save` is always performed before returning on shutdown.
 pub fn run(config: &Config, seen: &mut SeenStore, seen_path: &Path, shutdown: &AtomicBool) {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
+    let ureq_config = ureq::Agent::config_builder()
         .timeout_global(Some(HTTP_TIMEOUT))
         .user_agent(USER_AGENT)
-        .build()
-        .into();
+        .build();
+    let agent: ureq::Agent = match config.doh_endpoint() {
+        Some(endpoint) => {
+            log::info!("resolving feed hostnames via DNS-over-HTTPS ({endpoint})");
+            ureq::Agent::with_parts(
+                ureq_config,
+                ureq::unversioned::transport::DefaultConnector::default(),
+                crate::doh::DohResolver::new(endpoint),
+            )
+        }
+        None => ureq_config.into(),
+    };
 
     loop {
         if shutdown.load(Ordering::Relaxed) {

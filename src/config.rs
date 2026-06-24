@@ -20,6 +20,15 @@ pub struct Feed {
     pub url: String,
 }
 
+/// The `doh` config value: either a bool toggle (`doh = true` → default
+/// endpoint) or an explicit DoH-JSON endpoint URL (`doh = "https://.../dns-query"`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Doh {
+    Enabled(bool),
+    Endpoint(String),
+}
+
 /// Daemon configuration loaded from `config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,8 +37,29 @@ pub struct Config {
     pub poll_interval_secs: u64,
     #[serde(default = "default_max_age_minutes")]
     pub max_age_minutes: i64,
+    /// Optional DNS-over-HTTPS resolution for feed hostnames. `doh = true` uses
+    /// the default endpoint; `doh = "https://host/dns-query"` overrides it.
+    /// Useful when local DNS is hijacked (e.g. a fake-IP VPN). Omit to use the
+    /// system resolver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doh: Option<Doh>,
     #[serde(default)]
     pub feeds: Vec<Feed>,
+}
+
+impl Config {
+    /// Resolve the configured DoH endpoint URL, if DoH is enabled.
+    ///
+    /// - absent or `doh = false` → `None` (use the system resolver)
+    /// - `doh = true` → the default endpoint
+    /// - `doh = "<url>"` → that endpoint
+    pub fn doh_endpoint(&self) -> Option<String> {
+        match &self.doh {
+            None | Some(Doh::Enabled(false)) => None,
+            Some(Doh::Enabled(true)) => Some(crate::doh::DEFAULT_DOH_ENDPOINT.to_string()),
+            Some(Doh::Endpoint(url)) => Some(url.clone()),
+        }
+    }
 }
 
 /// The built-in default configuration (three default feeds).
@@ -37,6 +67,7 @@ pub fn default_config() -> Config {
     Config {
         poll_interval_secs: default_poll_interval_secs(),
         max_age_minutes: default_max_age_minutes(),
+        doh: None,
         feeds: vec![
             Feed {
                 name: "OpenAI".to_string(),
@@ -99,6 +130,13 @@ fn validate(config: &Config) -> Result<()> {
         anyhow::bail!(
             "max_age_minutes must be between 1 and {MAX_AGE_MINUTES_CAP} (got {})",
             config.max_age_minutes
+        );
+    }
+    if let Some(Doh::Endpoint(url)) = &config.doh
+        && !(url.starts_with("https://") || url.starts_with("http://"))
+    {
+        anyhow::bail!(
+            "doh endpoint must be an http(s) URL (got {url:?}); use `doh = true` for the default"
         );
     }
     Ok(())
@@ -240,5 +278,79 @@ mod tests {
             validate(&config).is_err(),
             "max_age_minutes above the cap must be rejected (overflow guard)"
         );
+    }
+
+    #[test]
+    fn doh_defaults_to_none_when_absent() {
+        let toml_str = r#"
+            [[feeds]]
+            name = "OpenAI"
+            url = "https://status.openai.com/feed.atom"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.doh, None);
+        assert_eq!(config.doh_endpoint(), None);
+    }
+
+    #[test]
+    fn doh_bool_true_uses_default_endpoint() {
+        let toml_str = r#"
+            doh = true
+            [[feeds]]
+            name = "OpenAI"
+            url = "https://status.openai.com/feed.atom"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        assert_eq!(config.doh, Some(Doh::Enabled(true)));
+        assert_eq!(
+            config.doh_endpoint().as_deref(),
+            Some(crate::doh::DEFAULT_DOH_ENDPOINT)
+        );
+    }
+
+    #[test]
+    fn doh_bool_false_disables() {
+        let mut config = default_config();
+        config.doh = Some(Doh::Enabled(false));
+        assert_eq!(config.doh_endpoint(), None);
+    }
+
+    #[test]
+    fn doh_string_overrides_endpoint() {
+        let toml_str = r#"
+            doh = "https://8.8.8.8/resolve"
+            [[feeds]]
+            name = "OpenAI"
+            url = "https://status.openai.com/feed.atom"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        assert_eq!(
+            config.doh,
+            Some(Doh::Endpoint("https://8.8.8.8/resolve".to_string()))
+        );
+        assert_eq!(
+            config.doh_endpoint().as_deref(),
+            Some("https://8.8.8.8/resolve")
+        );
+        assert!(validate(&config).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_non_url_doh_endpoint() {
+        let mut config = default_config();
+        config.doh = Some(Doh::Endpoint("1.1.1.1".to_string()));
+        assert!(
+            validate(&config).is_err(),
+            "a doh endpoint without an http(s) scheme must be rejected"
+        );
+    }
+
+    #[test]
+    fn doh_round_trips_through_toml() {
+        let mut config = default_config();
+        config.doh = Some(Doh::Endpoint("https://1.1.1.1/dns-query".to_string()));
+        let serialized = toml::to_string_pretty(&config).expect("serialize");
+        let parsed: Config = toml::from_str(&serialized).expect("parse");
+        assert_eq!(config, parsed);
     }
 }

@@ -41,7 +41,6 @@ pub struct Entry {
 /// skipped (logged at debug). The status text source prefers the entry's
 /// `<content>` body and falls back to its `<summary>`; the text is HTML-stripped
 /// before keyword extraction.
-#[allow(dead_code)]
 pub fn parse_feed(xml: &str) -> anyhow::Result<Vec<Entry>> {
     let feed = feed_rs::parser::parse(xml.as_bytes()).context("parsing feed XML")?;
 
@@ -83,7 +82,6 @@ pub fn parse_feed(xml: &str) -> anyhow::Result<Vec<Entry>> {
 /// `User-Agent`; non-2xx responses already surface as errors via ureq's
 /// `http_status_as_error` default. The body is read through a bounded reader
 /// capped at [`MAX_BODY_BYTES`].
-#[allow(dead_code)]
 pub fn fetch_and_parse(agent: &ureq::Agent, feed: &Feed) -> anyhow::Result<Vec<Entry>> {
     let response = agent
         .get(&feed.url)
@@ -119,7 +117,6 @@ const STATUS_KEYWORDS: &[&str] = &[
 /// - Unrecognized entities (e.g. numeric `&#9731;` or unknown named ones) are
 ///   left as-is, verbatim.
 /// - Collapses runs of whitespace to a single space and trims the result.
-#[allow(dead_code)]
 pub fn strip_html(input: &str) -> String {
     // First, drop tags.
     let mut without_tags = String::with_capacity(input.len());
@@ -181,7 +178,6 @@ fn match_entity(s: &str) -> Option<(char, usize)> {
 /// case-insensitively on a word boundary. "First" means the keyword whose
 /// match occurs earliest in the text. Returns the canonical capitalized
 /// keyword, or `None` if no keyword is present.
-#[allow(dead_code)]
 pub fn parse_status(input: &str) -> Option<String> {
     let lower = input.to_lowercase();
     let bytes = lower.as_bytes();

@@ -77,7 +77,11 @@ fn process_feed(
             continue;
         }
 
-        let body = notify::build_body(entry.status.as_deref(), entry.link.as_deref());
+        let body = notify::build_body(
+            entry.status.as_deref(),
+            entry.detail.as_deref(),
+            entry.link.as_deref(),
+        );
         // Only record the entry as seen if delivery actually succeeded; a
         // transient send failure must not permanently suppress this update.
         if notify::send(&feed.name, &entry.title, &body) {

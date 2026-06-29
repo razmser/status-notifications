@@ -25,20 +25,34 @@ pub fn init() -> anyhow::Result<()> {
         .with_context(|| format!("failed to set notification application identity to {bundle:?}"))
 }
 
-/// Build the notification body from the optional status line and link.
+/// Build the notification body from the optional status keyword, detail message,
+/// and link.
 ///
-/// Layout:
-/// - both → `"<status>\n<link>"`
+/// The first line composes the status keyword and detail prose:
+/// - status + detail → `"<status> — <detail>"` (separator is ` — `, an em-dash
+///   U+2014 with surrounding spaces)
+/// - detail only → `"<detail>"` (defensive/unreachable: `detail` is `Some` only
+///   when a keyword block was found, which also makes `status` `Some`)
 /// - status only → `"<status>"`
-/// - link only → `"<link>"`
 /// - neither → `""`
-pub fn build_body(status: Option<&str>, link: Option<&str>) -> String {
-    match (status, link) {
-        (Some(status), Some(link)) => format!("{status}\n{link}"),
+///
+/// When a `link` is present, `"\n<link>"` is appended to that line.
+pub fn build_body(status: Option<&str>, detail: Option<&str>, link: Option<&str>) -> String {
+    let mut body = match (status, detail) {
+        (Some(status), Some(detail)) => format!("{status} — {detail}"),
+        (None, Some(detail)) => detail.to_string(),
         (Some(status), None) => status.to_string(),
-        (None, Some(link)) => link.to_string(),
         (None, None) => String::new(),
+    };
+
+    if let Some(link) = link {
+        if !body.is_empty() {
+            body.push('\n');
+        }
+        body.push_str(link);
     }
+
+    body
 }
 
 /// Deliver a single native notification.
@@ -72,28 +86,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn build_body_both() {
+    fn build_body_status_and_detail_with_link() {
         assert_eq!(
-            build_body(Some("Resolved"), Some("https://example.com/x")),
-            "Resolved\nhttps://example.com/x"
+            build_body(
+                Some("Monitoring"),
+                Some("A fix has been implemented"),
+                Some("https://example.com/x"),
+            ),
+            "Monitoring — A fix has been implemented\nhttps://example.com/x"
         );
     }
 
     #[test]
-    fn build_body_status_only() {
-        assert_eq!(build_body(Some("Investigating"), None), "Investigating");
+    fn build_body_status_and_detail_no_link() {
+        assert_eq!(
+            build_body(Some("Monitoring"), Some("A fix has been implemented"), None),
+            "Monitoring — A fix has been implemented"
+        );
     }
 
     #[test]
-    fn build_body_link_only() {
+    fn build_body_status_only_with_link() {
         assert_eq!(
-            build_body(None, Some("https://example.com/x")),
+            build_body(Some("Investigating"), None, Some("https://example.com/x")),
+            "Investigating\nhttps://example.com/x"
+        );
+    }
+
+    #[test]
+    fn build_body_status_only_no_link() {
+        assert_eq!(
+            build_body(Some("Investigating"), None, None),
+            "Investigating"
+        );
+    }
+
+    #[test]
+    fn build_body_neither_with_link() {
+        assert_eq!(
+            build_body(None, None, Some("https://example.com/x")),
             "https://example.com/x"
         );
     }
 
     #[test]
-    fn build_body_neither() {
-        assert_eq!(build_body(None, None), "");
+    fn build_body_neither_no_link() {
+        assert_eq!(build_body(None, None, None), "");
+    }
+
+    // Defensive: the detail-only branch is unreachable in practice (whenever
+    // `detail` is `Some`, `status` is `Some` too). This test exists only to
+    // assert the match arm is total and well-behaved, not as a live runtime mode.
+    #[test]
+    fn build_body_detail_only_is_total() {
+        assert_eq!(
+            build_body(None, Some("orphan detail"), None),
+            "orphan detail"
+        );
     }
 }

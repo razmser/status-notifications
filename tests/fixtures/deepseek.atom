@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:status.deepseek.com,2005:/incidents</id>
+  <title>DeepSeek Status</title>
+  <updated>2026-06-24T12:34:56Z</updated>
+  <link rel="alternate" type="text/html" href="https://status.deepseek.com/"/>
+  <entry>
+    <id>tag:status.deepseek.com,2005:Incident/24680</id>
+    <published>2026-06-24T12:00:00Z</published>
+    <updated>2026-06-24T12:30:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://status.deepseek.com/incidents/qwe456"/>
+    <title>API access disruption</title>
+    <summary type="html">&lt;p&gt;&lt;strong&gt;Status:&lt;/strong&gt; resolved&lt;/p&gt;&lt;p&gt;服务已恢复正常，所有功能可正常使用。 Service has returned to normal and all features are available.&lt;/p&gt;</summary>
+  </entry>
+</feed>

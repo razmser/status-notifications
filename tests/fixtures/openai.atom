@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <id>tag:status.openai.com,2005:/incidents</id>
+  <title>OpenAI Status</title>
+  <updated>2026-06-24T12:34:56Z</updated>
+  <link rel="alternate" type="text/html" href="https://status.openai.com/"/>
+  <entry>
+    <id>tag:status.openai.com,2005:Incident/67890</id>
+    <published>2026-06-24T12:00:00Z</published>
+    <updated>2026-06-24T12:30:00Z</updated>
+    <link rel="alternate" type="text/html" href="https://status.openai.com/incidents/xyz789"/>
+    <title>Elevated error rates</title>
+    <content type="html"><![CDATA[<b>Status: Monitoring</b><br/><br/>A fix has been deployed and traffic is recovering.<br/><br/><b>Affected components</b><ul><li>API</li><li>Dashboard</li></ul>]]></content>
+  </entry>
+</feed>

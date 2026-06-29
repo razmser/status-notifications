@@ -633,6 +633,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_feed_extracts_detail_claude_stacked_latest_update_only() {
+        // Claude/Statuspage: three stacked <p> updates, newest first. Only the
+        // latest update's message is surfaced; extraction stops at the next
+        // keyword ("Identified") and the leading timestamp does not leak in.
+        let xml = include_bytes!("../tests/fixtures/claude_stacked.atom");
+        let entries = parse_feed(xml, TEST_BASE_URI).expect("claude_stacked.atom should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status.as_deref(), Some("Monitoring"));
+        let detail = entries[0].detail.as_deref().expect("detail present");
+        assert_eq!(
+            detail,
+            "A fix has been implemented and we are monitoring the results."
+        );
+        assert!(!detail.contains("Identified"), "must not leak older update");
+        assert!(!detail.contains("UTC"), "must not leak timestamp");
+    }
+
+    #[test]
+    fn parse_feed_extracts_detail_openai_without_components_list() {
+        // OpenAI/Instatus: CDATA <b>Status: kw</b> + message + "Affected
+        // components" <ul>. The list section is excluded from the detail.
+        let xml = include_bytes!("../tests/fixtures/openai.atom");
+        let entries = parse_feed(xml, TEST_BASE_URI).expect("openai.atom should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status.as_deref(), Some("Monitoring"));
+        let detail = entries[0].detail.as_deref().expect("detail present");
+        assert_eq!(detail, "A fix has been deployed and traffic is recovering.");
+        assert!(
+            !detail.contains("Affected components"),
+            "must not include the components section"
+        );
+        assert!(!detail.contains("API"), "must not include the list items");
+    }
+
+    #[test]
+    fn parse_feed_extracts_detail_deepseek_from_summary_fallback() {
+        // DeepSeek/FlashDuty: <summary>-only (no <content>), with the keyword in
+        // the first <p> and the bilingual message in a separate second <p>. This
+        // exercises the content->summary fallback and the following-block fold.
+        let xml = include_bytes!("../tests/fixtures/deepseek.atom");
+        let entries = parse_feed(xml, TEST_BASE_URI).expect("deepseek.atom should parse");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status.as_deref(), Some("Resolved"));
+        assert_eq!(
+            entries[0].detail.as_deref(),
+            Some(
+                "服务已恢复正常，所有功能可正常使用。 Service has returned to normal and all features are available."
+            )
+        );
+    }
+
+    #[test]
     fn strip_html_passes_bare_ampersand_verbatim() {
         // A bare '&' (not the start of a recognized entity) must pass through
         // verbatim without panicking.

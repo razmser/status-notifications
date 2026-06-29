@@ -1,6 +1,6 @@
 //! Feed fetching, parsing, and normalization.
 //!
-//! Pure helpers (`strip_html`, `parse_status`) are factored out so they can be
+//! Pure helpers (`strip_html`, `find_status`) are factored out so they can be
 //! unit-tested without any network or notification side effects. `parse_feed`
 //! turns raw Atom/RSS into normalized [`Entry`]s, and `fetch_and_parse` wraps it
 //! with a bounded HTTP GET over a shared browser-emulating [`wreq::Client`].
@@ -80,7 +80,8 @@ pub fn parse_feed(xml: &[u8], base_uri: &str) -> anyhow::Result<Vec<Entry>> {
             .content
             .and_then(|c| c.body)
             .or_else(|| entry.summary.map(|s| s.content));
-        let status = status_text.and_then(|text| parse_status(&strip_html(&text)));
+        let status = status_text
+            .and_then(|text| find_status(&strip_html(&text)).map(|(_, k)| k.to_string()));
 
         entries.push(Entry {
             id: entry.id,
@@ -206,29 +207,32 @@ fn match_entity(s: &str) -> Option<(char, usize)> {
         .map(|(name, ch)| (*ch, name.len()))
 }
 
-/// Return the first matching status keyword from the ordered set, matched
-/// case-insensitively on a word boundary. "First" means the keyword whose
-/// match occurs earliest in the text. Returns the canonical capitalized
-/// keyword, or `None` if no keyword is present.
-pub fn parse_status(input: &str) -> Option<String> {
-    let lower = input.to_lowercase();
-    let bytes = lower.as_bytes();
+/// Find the earliest status keyword in `input`, matched ASCII-case-insensitively
+/// on a word boundary. Returns the byte position where the match starts (valid
+/// for slicing `input`) together with the canonical capitalized keyword, or
+/// `None` if no keyword is present. "Earliest" means the match occurring first
+/// by byte position in the text, not by keyword order.
+///
+/// The match runs over the **original** string (comparing bytes
+/// case-insensitively) rather than a `to_lowercase()` copy: lowercasing can
+/// change byte lengths for some non-ASCII characters, which would shift the
+/// returned position relative to the original text and corrupt later slicing.
+pub fn find_status(input: &str) -> Option<(usize, &'static str)> {
+    let bytes = input.as_bytes();
 
-    let mut best: Option<usize> = None;
-    let mut best_keyword: Option<&str> = None;
+    let mut best: Option<(usize, &'static str)> = None;
 
     for keyword in STATUS_KEYWORDS {
-        let needle = keyword.to_lowercase();
+        let needle = keyword.as_bytes();
         let mut from = 0;
-        while let Some(rel) = lower[from..].find(&needle) {
+        while let Some(rel) = find_ascii_ci(&bytes[from..], needle) {
             let pos = from + rel;
             let end = pos + needle.len();
             let before_ok = pos == 0 || !is_word_byte(bytes[pos - 1]);
             let after_ok = end >= bytes.len() || !is_word_byte(bytes[end]);
             if before_ok && after_ok {
-                if best.is_none_or(|b| pos < b) {
-                    best = Some(pos);
-                    best_keyword = Some(keyword);
+                if best.is_none_or(|(b, _)| pos < b) {
+                    best = Some((pos, keyword));
                 }
                 break;
             }
@@ -236,7 +240,24 @@ pub fn parse_status(input: &str) -> Option<String> {
         }
     }
 
-    best_keyword.map(|k| (*k).to_string())
+    best
+}
+
+/// Find the first occurrence of `needle` in `haystack`, comparing bytes
+/// ASCII-case-insensitively. Returns the byte offset of the match, or `None`.
+fn find_ascii_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if haystack.len() < needle.len() {
+        return None;
+    }
+    (0..=haystack.len() - needle.len()).find(|&start| {
+        haystack[start..start + needle.len()]
+            .iter()
+            .zip(needle)
+            .all(|(h, n)| h.eq_ignore_ascii_case(n))
+    })
 }
 
 /// A "word" byte for boundary purposes: ASCII alphanumeric or underscore.
@@ -275,44 +296,54 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_finds_keyword() {
+    fn find_status_finds_keyword() {
         assert_eq!(
-            parse_status("The incident has been Resolved."),
-            Some("Resolved".to_string())
+            find_status("The incident has been Resolved.").map(|(_, k)| k),
+            Some("Resolved")
         );
         assert_eq!(
-            parse_status("we are monitoring the situation"),
-            Some("Monitoring".to_string())
+            find_status("we are monitoring the situation").map(|(_, k)| k),
+            Some("Monitoring")
         );
     }
 
     #[test]
-    fn parse_status_returns_none_when_absent() {
-        assert_eq!(parse_status("Everything is fine, nothing to report"), None);
+    fn find_status_returns_none_when_absent() {
+        assert_eq!(find_status("Everything is fine, nothing to report"), None);
     }
 
     #[test]
-    fn parse_status_picks_first_when_multiple_present() {
+    fn find_status_picks_first_when_multiple_present() {
         // "Monitoring" appears before "Resolved" in the text, so it wins even
         // though "Resolved" comes earlier in the keyword ordering. "First"
         // means earliest by position in the text, not by keyword order.
         let text = "We are Monitoring the fix. Later it was Resolved.";
-        assert_eq!(parse_status(text), Some("Monitoring".to_string()));
+        assert_eq!(find_status(text).map(|(_, k)| k), Some("Monitoring"));
 
         // And when "Update" leads the text, it is correctly the first match.
         let text2 = "Update: now Resolved.";
-        assert_eq!(parse_status(text2), Some("Update".to_string()));
+        assert_eq!(find_status(text2).map(|(_, k)| k), Some("Update"));
     }
 
     #[test]
-    fn parse_status_requires_word_boundary() {
+    fn find_status_requires_word_boundary() {
         // "Resolved" embedded in a larger word must not match.
-        assert_eq!(parse_status("unResolvedness lingers"), None);
+        assert_eq!(find_status("unResolvedness lingers"), None);
         // But adjacent punctuation is a valid boundary.
         assert_eq!(
-            parse_status("(Investigating)"),
-            Some("Investigating".to_string())
+            find_status("(Investigating)").map(|(_, k)| k),
+            Some("Investigating")
         );
+    }
+
+    #[test]
+    fn find_status_returns_position_at_keyword_start() {
+        let text = "We are Monitoring the fix.";
+        let (pos, keyword) = find_status(text).expect("keyword present");
+        assert_eq!(keyword, "Monitoring");
+        assert_eq!(pos, text.find("Monitoring").unwrap());
+        // The returned position must slice the original text at the keyword.
+        assert!(text[pos..].starts_with("Monitoring"));
     }
 
     #[test]
@@ -345,10 +376,17 @@ mod tests {
     }
 
     #[test]
-    fn parse_status_handles_non_ascii_before_keyword() {
+    fn find_status_handles_non_ascii_before_keyword() {
         // A multi-byte char immediately preceding the keyword is a valid word
-        // boundary and must not corrupt byte-index handling.
-        assert_eq!(parse_status("café Resolved"), Some("Resolved".to_string()));
+        // boundary and must not corrupt byte-index handling. The returned
+        // position must still slice the original (non-ASCII) text at the keyword.
+        let text = "café Resolved";
+        let (pos, keyword) = find_status(text).expect("keyword present");
+        assert_eq!(keyword, "Resolved");
+        assert!(
+            text[pos..].starts_with("Resolved"),
+            "position must remain valid for slicing original non-ASCII text"
+        );
     }
 
     #[test]

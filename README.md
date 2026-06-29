@@ -23,8 +23,9 @@ a banner the moment an incident opens, progresses, or resolves.
   required for banners to appear).
 
 A notification shows the feed name as the title, the incident title as the
-subtitle, and the status keyword (e.g. *Investigating*, *Monitoring*,
-*Resolved*) plus a link in the body.
+subtitle, and in the body the status keyword (e.g. *Investigating*,
+*Monitoring*, *Resolved*) together with the latest update's message text plus a
+link.
 
 ## Requirements
 

@@ -89,6 +89,13 @@ Key design decisions:
   `status = find_status(&strip_html(&status_text)).map(canonical)`;
   `detail = extract_latest_detail(&status_text)` (operates on raw HTML for block
   boundaries).
+- **Known limitations (non-default feeds only; Statuspage/Instatus/FlashDuty
+  unaffected):** `extract_latest_detail` is a heuristic that degrades gracefully on
+  arbitrary user feeds. A multi-paragraph message whose *later* paragraph begins with
+  a status-keyword word may be truncated at that paragraph (the trailing paragraphs are
+  dropped, not folded in). The terse-latest-update-then-stacked-header merge edge is
+  handled: an emphasized `Status:`-label stacked header (keyword outside the span)
+  breaks the fold instead of merging.
 
 ## What Goes Where
 - **Implementation Steps** (`[ ]`): all code, tests, fixtures, and README update.
@@ -101,45 +108,45 @@ Key design decisions:
 **Files:**
 - Modify: `src/feed.rs`
 
-- [ ] add `find_status(&str) -> Option<(usize, &'static str)>` returning the earliest
+- [x] add `find_status(&str) -> Option<(usize, &'static str)>` returning the earliest
       keyword by position with the canonical capitalized keyword; word-boundary
       checked via `is_word_byte`.
-- [ ] match keywords **ASCII-case-insensitively over the original string** (not a
+- [x] match keywords **ASCII-case-insensitively over the original string** (not a
       `to_lowercase()` copy) so the byte position is valid for slicing original text.
-- [ ] remove `parse_status`; update its in-module caller in `parse_feed` to
+- [x] remove `parse_status`; update its in-module caller in `parse_feed` to
       `find_status(&stripped).map(|(_, k)| k.to_string())`.
-- [ ] port existing `parse_status` tests to `find_status`: finds keyword, earliest
+- [x] port existing `parse_status` tests to `find_status`: finds keyword, earliest
       by position wins, returns `None` when absent, word-boundary required,
       non-ASCII char before keyword keeps the returned byte position valid (assert
       the slice at that position starts with the keyword).
-- [ ] add a test asserting the returned position points at the keyword start.
-- [ ] run `cargo test` — must pass before Task 2.
+- [x] add a test asserting the returned position points at the keyword start.
+- [x] run `cargo test` — must pass before Task 2.
 
 ### Task 2: Add `extract_latest_detail` block extractor
 
 **Files:**
 - Modify: `src/feed.rs`
 
-- [ ] add `extract_latest_detail(html: &str) -> Option<String>`.
-- [ ] split decoded HTML into ordered blocks on `<p>`/`</p>` **and** `<br><br>`
+- [x] add `extract_latest_detail(html: &str) -> Option<String>`.
+- [x] split decoded HTML into ordered blocks on `<p>`/`</p>` **and** `<br><br>`
       boundaries (treat `<br/><br/>` with optional whitespace the same); carry the
       raw block (to detect `<ul`/`<li`) plus its `strip_html`-ed text; drop empties.
       A **single** `<br>` is deliberately *not* a split point: on Claude the
       timestamp sits in `<small>ts</small><br><strong>kw</strong>`, so keeping it in
       the keyword block lets "text after the keyword" discard it. Do not also split
       on single `<br>`.
-- [ ] find the first block whose stripped text contains a keyword (`find_status`);
+- [x] find the first block whose stripped text contains a keyword (`find_status`);
       take its text **after** the keyword.
-- [ ] append following blocks that contain no keyword and no `<ul`/`<li`; stop at the
+- [x] append following blocks that contain no keyword and no `<ul`/`<li`; stop at the
       first block that contains a keyword OR `<ul`/`<li`.
-- [ ] clean: collapse whitespace, strip a leading `-`/`–`/`:` and surrounding spaces,
+- [x] clean: collapse whitespace, strip a leading `-`/`–`/`:` and surrounding spaces,
       trim; return `None` if empty.
-- [ ] truncate to 200 **chars** (char-safe), appending `…` when cut.
-- [ ] write tests using inline XML/HTML strings: stops at next keyword (no timestamp
+- [x] truncate to 200 **chars** (char-safe), appending `…` when cut.
+- [x] write tests using inline XML/HTML strings: stops at next keyword (no timestamp
       leak), stops before a `<ul>` section, folds in a following non-keyword block,
       no-keyword → `None`, list-immediately-after-keyword → `None`, truncation at 200
       chars appends `…` on a non-ASCII string.
-- [ ] run `cargo test` — must pass before Task 3.
+- [x] run `cargo test` — must pass before Task 3.
 
 ### Task 3: Add `detail` to `Entry` and populate it in `parse_feed`
 
@@ -152,13 +159,13 @@ Key design decisions:
 > `#[cfg(test)]`). `cargo test` compiles test code, so the new field must be added
 > to **both** sites in this task or the Task 3 gate fails to compile.
 
-- [ ] add `detail: Option<String>` to `Entry`.
-- [ ] in `parse_feed`, set `detail = extract_latest_detail(&status_text)` using the
+- [x] add `detail: Option<String>` to `Entry`.
+- [x] in `parse_feed`, set `detail = extract_latest_detail(&status_text)` using the
       raw content→summary text (status source preference unchanged).
-- [ ] add `detail: None` to the `entry(...)` test constructor in `src/daemon.rs` so
+- [x] add `detail: None` to the `entry(...)` test constructor in `src/daemon.rs` so
       the `#[cfg(test)]` build compiles.
-- [ ] update the existing `parse_feed` field-extraction test to assert `detail`.
-- [ ] run `cargo test` — must pass before Task 4.
+- [x] update the existing `parse_feed` field-extraction test to assert `detail`.
+- [x] run `cargo test` — must pass before Task 4.
 
 ### Task 4: Add real-format fixtures and `parse_feed` coverage
 
@@ -168,16 +175,16 @@ Key design decisions:
 - Create: `tests/fixtures/claude_stacked.atom`
 - Modify: `src/feed.rs`
 
-- [ ] add `openai.atom` (CDATA `<b>Status: …</b>` + `<br><br>` + `Affected
+- [x] add `openai.atom` (CDATA `<b>Status: …</b>` + `<br><br>` + `Affected
       components` `<ul>`), trimmed to 1 entry.
-- [ ] add `deepseek.atom` (`<summary>`-only, two `<p>`: status / bilingual message),
+- [x] add `deepseek.atom` (`<summary>`-only, two `<p>`: status / bilingual message),
       trimmed to 1 entry.
-- [ ] add `claude_stacked.atom` (`<content>` with 3 `<p>` updates newest-first).
-- [ ] add `parse_feed` tests asserting `detail` for each fixture: Claude → latest
+- [x] add `claude_stacked.atom` (`<content>` with 3 `<p>` updates newest-first).
+- [x] add `parse_feed` tests asserting `detail` for each fixture: Claude → latest
       update only (stops at "Identified"); OpenAI → message without "Affected
       components"/list; DeepSeek → bilingual message folded from 2nd `<p>` (exercises
       the summary fallback).
-- [ ] run `cargo test` — must pass before Task 5.
+- [x] run `cargo test` — must pass before Task 5.
 
 ### Task 5: Thread `detail` through `build_body` and `process_feed`
 
@@ -185,28 +192,34 @@ Key design decisions:
 - Modify: `src/notify.rs`
 - Modify: `src/daemon.rs`
 
-- [ ] change `build_body` to `build_body(status: Option<&str>, detail: Option<&str>,
+- [x] change `build_body` to `build_body(status: Option<&str>, detail: Option<&str>,
       link: Option<&str>) -> String` with the four compositions (` — ` separator) and
       optional `\n<link>` suffix.
-- [ ] update `process_feed` to pass `entry.detail.as_deref()`.
-- [ ] add the new `detail` field to the `entry(...)` test constructor in
-      `daemon.rs` tests.
-- [ ] update/extend `build_body` tests: the reachable modes (both / status-only /
+- [x] update `process_feed` to pass `entry.detail.as_deref()`.
+- [x] add the new `detail` field to the `entry(...)` test constructor in
+      `daemon.rs` tests. (Note: already present from Task 3 — verified, not duplicated.)
+- [x] update/extend `build_body` tests: the reachable modes (both / status-only /
       neither) each with and without a link, plus one defensive test for the
       unreachable detail-only branch (asserting match totality, not a live case).
-- [ ] run `cargo test` — must pass before Task 6.
+- [x] run `cargo test` — must pass before Task 6.
 
 ### Task 6: Verify acceptance criteria
-- [ ] verify body now shows `Keyword — message` for all three default feed formats
-      (via the fixture-backed tests).
-- [ ] verify graceful fallbacks: keyword-only and detail-only and neither.
-- [ ] run full suite: `cargo test`.
-- [ ] run `cargo clippy --all-targets` and `cargo fmt --check`.
+- [x] verify body now shows `Keyword — message` for all three default feed formats
+      (via the fixture-backed tests). Added end-to-end test
+      `build_body_renders_keyword_message_for_all_default_feed_formats` in
+      `src/feed.rs` combining each fixture's parsed status+detail through
+      `build_body`; pairs with the existing per-fixture `parse_feed` and `build_body`
+      tests.
+- [x] verify graceful fallbacks: keyword-only and detail-only and neither (covered by
+      `build_body_status_only_*`, `build_body_neither_*`, and
+      `build_body_detail_only_is_total` in `src/notify.rs`).
+- [x] run full suite: `cargo test` — 58 passed.
+- [x] run `cargo clippy --all-targets` (clean) and `cargo fmt --check` (clean).
 
 ### Task 7: [Final] Update documentation
-- [ ] update `README.md` "How it works" — body now shows the status keyword **and
+- [x] update `README.md` "How it works" — body now shows the status keyword **and
       the latest update's message** plus the link.
-- [ ] move this plan to `docs/plans/completed/`.
+- [x] move this plan to `docs/plans/completed/`.
 
 ## Post-Completion
 *Items requiring manual intervention — no checkboxes, informational only.*

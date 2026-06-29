@@ -145,18 +145,26 @@ const STATUS_KEYWORDS: &[&str] = &[
 
 /// Remove HTML tags, decode a few common entities, and collapse whitespace.
 ///
-/// - Drops anything between `<` and `>` (tags).
+/// - Drops anything between `<` and `>` (tags), replacing each tag with a single
+///   space so adjacent text never fuses across a tag boundary (e.g.
+///   `ts</small><br><strong>Monitoring` becomes `ts Monitoring`, not
+///   `tsMonitoring`). Without this, a keyword glued to preceding text would lose
+///   its word boundary and go undetected.
 /// - Decodes `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&#39;`.
 /// - Unrecognized entities (e.g. numeric `&#9731;` or unknown named ones) are
 ///   left as-is, verbatim.
-/// - Collapses runs of whitespace to a single space and trims the result.
+/// - Collapses runs of whitespace to a single space and trims the result, so the
+///   inserted spaces never produce doubled or leading/trailing whitespace.
 pub fn strip_html(input: &str) -> String {
-    // First, drop tags.
+    // First, drop tags, leaving a space where each tag was.
     let mut without_tags = String::with_capacity(input.len());
     let mut in_tag = false;
     for ch in input.chars() {
         match ch {
-            '<' => in_tag = true,
+            '<' => {
+                in_tag = true;
+                without_tags.push(' ');
+            }
             '>' => in_tag = false,
             _ if !in_tag => without_tags.push(ch),
             _ => {}
@@ -265,6 +273,188 @@ fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Maximum number of **characters** (not bytes) kept in an extracted detail
+/// message. Notifications are short-lived banners; the cap keeps the body
+/// bounded regardless of how verbose a status update is.
+const DETAIL_MAX_CHARS: usize = 200;
+
+/// Extract the latest update's message prose from a raw HTML status body.
+///
+/// Models an *update* as a keyword-bearing block plus the prose blocks that
+/// follow it, stopping at the next keyword block or a list/components section.
+/// The single abstraction covers all three real provider formats (Statuspage,
+/// Instatus, FlashDuty) and degrades to `None` for feeds it can't model.
+///
+/// Returns the cleaned, length-capped message (with the leading keyword and any
+/// `Keyword - ` / `Status:` lead-in removed), or `None` when no keyword block is
+/// present or the message would be empty.
+pub fn extract_latest_detail(html: &str) -> Option<String> {
+    let blocks = split_into_blocks(html);
+
+    // The first block that carries a status keyword starts the latest update.
+    let kw_index = blocks
+        .iter()
+        .position(|(_, stripped)| find_status(stripped).is_some())?;
+
+    let mut parts: Vec<String> = Vec::new();
+
+    // Text that follows the keyword within its own block (discards any leading
+    // timestamp, which sits *before* the keyword and is thus dropped).
+    let (_, kw_stripped) = &blocks[kw_index];
+    let (pos, keyword) = find_status(kw_stripped)?;
+    let after = &kw_stripped[pos + keyword.len()..];
+    if !after.trim().is_empty() {
+        parts.push(after.to_string());
+    }
+
+    // Fold in following blocks until the next keyword or a list/components
+    // section, both of which mark the end of this update's prose.
+    for (raw, stripped) in &blocks[kw_index + 1..] {
+        if find_status(stripped).is_some() || contains_list(raw) {
+            break;
+        }
+        parts.push(stripped.clone());
+    }
+
+    let cleaned = clean_detail(&parts.join(" "));
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&cleaned, DETAIL_MAX_CHARS))
+}
+
+/// Split raw HTML into ordered blocks on `<p>`/`</p>` and `<br><br>` (double
+/// break) boundaries. A **single** `<br>` is deliberately not a split point so a
+/// `<small>ts</small><br><strong>kw</strong>` timestamp stays in the keyword
+/// block (and is later discarded as text *before* the keyword).
+///
+/// Each block is returned as `(raw, stripped)`: the raw slice retains tags so
+/// `<ul>`/`<li>` sections can be detected, while `stripped` is the
+/// `strip_html`-ed text used for keyword matching. Blocks whose stripped text is
+/// empty are dropped.
+fn split_into_blocks(html: &str) -> Vec<(String, String)> {
+    let mut raw_blocks: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut i = 0;
+    while i < html.len() {
+        let rest = &html[i..];
+        if let Some(len) = match_p_tag(rest) {
+            raw_blocks.push(std::mem::take(&mut current));
+            i += len;
+            continue;
+        }
+        if let Some(len) = match_double_br(rest) {
+            raw_blocks.push(std::mem::take(&mut current));
+            i += len;
+            continue;
+        }
+        // Not a boundary: copy one whole UTF-8 char into the current block.
+        let ch = rest.chars().next().expect("non-empty rest");
+        let len = ch.len_utf8();
+        current.push_str(&rest[..len]);
+        i += len;
+    }
+    raw_blocks.push(current);
+
+    raw_blocks
+        .into_iter()
+        .map(|raw| {
+            let stripped = strip_html(&raw);
+            (raw, stripped)
+        })
+        .filter(|(_, stripped)| !stripped.is_empty())
+        .collect()
+}
+
+/// If `s` starts with a `<p>`/`<p ...>`/`</p>`/`</p ...>` tag, return its byte
+/// length. `<pre>`, `<param>`, etc. are not matched (the char after `p` must be
+/// `>` or whitespace).
+fn match_p_tag(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.is_empty() || b[0] != b'<' {
+        return None;
+    }
+    let mut i = 1;
+    if i < b.len() && b[i] == b'/' {
+        i += 1;
+    }
+    if i >= b.len() || (b[i] | 0x20) != b'p' {
+        return None;
+    }
+    let after = i + 1;
+    if after >= b.len() || (b[after] != b'>' && !b[after].is_ascii_whitespace()) {
+        return None;
+    }
+    let gt = s[after..].find('>')?;
+    Some(after + gt + 1)
+}
+
+/// If `s` starts with a single `<br>`/`<br/>`/`<br />` tag, return its byte
+/// length. Tags like `<break>` are rejected (the chars between `br` and `>` must
+/// be only optional whitespace and an optional `/`).
+fn match_br_tag(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.len() < 4 || b[0] != b'<' || (b[1] | 0x20) != b'b' || (b[2] | 0x20) != b'r' {
+        return None;
+    }
+    let mut i = 3;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'/' {
+        i += 1;
+    }
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i < b.len() && b[i] == b'>' {
+        Some(i + 1)
+    } else {
+        None
+    }
+}
+
+/// If `s` starts with two consecutive `<br>` tags (separated only by optional
+/// whitespace), return the total byte length consumed.
+fn match_double_br(s: &str) -> Option<usize> {
+    let first = match_br_tag(s)?;
+    let b = s.as_bytes();
+    let mut i = first;
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let second = match_br_tag(&s[i..])?;
+    Some(i + second)
+}
+
+/// Whether `raw` contains the start of a list (`<ul`/`<li`), matched
+/// ASCII-case-insensitively. Used as a locale-independent stop boundary for the
+/// "Affected components" section.
+fn contains_list(raw: &str) -> bool {
+    find_ascii_ci(raw.as_bytes(), b"<ul").is_some()
+        || find_ascii_ci(raw.as_bytes(), b"<li").is_some()
+}
+
+/// Collapse whitespace, drop a single leading `-`/`–`/`:` separator (and its
+/// surrounding spaces), and trim.
+fn clean_detail(s: &str) -> String {
+    let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    let stripped = trimmed.strip_prefix(['-', '–', ':']).unwrap_or(trimmed);
+    stripped.trim().to_string()
+}
+
+/// Truncate `s` to at most `max` characters (char-safe), appending `…` when the
+/// string was cut.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max).collect();
+        format!("{truncated}…")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +534,69 @@ mod tests {
         assert_eq!(pos, text.find("Monitoring").unwrap());
         // The returned position must slice the original text at the keyword.
         assert!(text[pos..].starts_with("Monitoring"));
+    }
+
+    #[test]
+    fn extract_latest_detail_stops_at_next_keyword_no_timestamp_leak() {
+        // Claude/Statuspage shape: stacked <p> updates, newest first, each with a
+        // <small>timestamp</small><br><strong>keyword</strong> lead-in. Only the
+        // latest update's message is returned, and the timestamp (which precedes
+        // the keyword) must not leak in.
+        let html = "<p><small>Jun 24, 12:30 PDT</small><br><strong>Monitoring</strong> - A fix has been implemented.</p>\
+<p><small>Jun 24, 12:00 PDT</small><br><strong>Identified</strong> - The root cause was found.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("A fix has been implemented.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_stops_before_list_section() {
+        // OpenAI/Instatus shape: <b>Status: kw</b>, message, then an "Affected
+        // components" <ul>. The list section must be excluded.
+        let html = "<b>Status: Monitoring</b><br/><br/>A fix has been deployed and traffic is recovering.<br/><br/><b>Affected components</b><ul><li>API</li></ul>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("A fix has been deployed and traffic is recovering.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_following_block() {
+        // DeepSeek/FlashDuty shape: keyword in one <p>, the (bilingual) message in
+        // a separate following <p>. The second block is folded into the detail.
+        let html =
+            "<p><strong>Status:</strong> resolved</p><p>The issue has been fixed. 问题已解决。</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("The issue has been fixed. 问题已解决。")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_returns_none_without_keyword() {
+        let html = "<p>All systems are operational and nothing is amiss.</p>";
+        assert_eq!(extract_latest_detail(html), None);
+    }
+
+    #[test]
+    fn extract_latest_detail_returns_none_when_list_immediately_follows_keyword() {
+        // Keyword block with no inline prose, immediately followed by a list:
+        // nothing to surface, so the detail is empty -> None.
+        let html = "<p><strong>Monitoring</strong></p><ul><li>API degraded</li></ul>";
+        assert_eq!(extract_latest_detail(html), None);
+    }
+
+    #[test]
+    fn extract_latest_detail_truncates_at_200_chars_with_ellipsis() {
+        // Non-ASCII message longer than the cap: truncation must be char-safe and
+        // append a single ellipsis.
+        let long = "あ".repeat(250);
+        let html = format!("<p><strong>Monitoring</strong> - {long}</p>");
+        let result = extract_latest_detail(&html).expect("keyword present");
+        assert_eq!(result.chars().count(), DETAIL_MAX_CHARS + 1);
+        assert!(result.ends_with('…'));
+        assert!(result.starts_with('あ'));
     }
 
     #[test]

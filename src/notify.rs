@@ -57,11 +57,12 @@ pub fn build_body(status: Option<&str>, detail: Option<&str>, link: Option<&str>
 
 /// Deliver a single native notification.
 ///
-/// `title` is the feed name, `subtitle` the entry title, `body` the status/link
-/// block. Plays the default system sound. Returns `true` if delivery succeeded
-/// and `false` if it failed. Delivery errors are logged and swallowed (never
-/// panic/propagate) so a failing send can't crash the poll loop; the returned
-/// `bool` lets the caller decide whether to mark the entry as seen.
+/// `title` is the feed name, `subtitle` the entry title, `body` the
+/// status/detail/link block. Plays the default system sound. Returns `true` if
+/// delivery succeeded and `false` if it failed. Delivery errors are logged and
+/// swallowed (never panic/propagate) so a failing send can't crash the poll
+/// loop; the returned `bool` lets the caller decide whether to mark the entry as
+/// seen.
 pub fn send(title: &str, subtitle: &str, body: &str) -> bool {
     let mut notification = Notification::new();
     notification.sound(Sound::Default);
@@ -142,6 +143,16 @@ mod tests {
         assert_eq!(
             build_body(None, Some("orphan detail"), None),
             "orphan detail"
+        );
+    }
+
+    // Defensive: the detail-only branch with a link present, to cover the
+    // link-append path on that (otherwise unreachable) arm.
+    #[test]
+    fn build_body_detail_only_with_link() {
+        assert_eq!(
+            build_body(None, Some("orphan detail"), Some("https://example.com/x")),
+            "orphan detail\nhttps://example.com/x"
         );
     }
 }

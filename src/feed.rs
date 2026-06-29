@@ -296,29 +296,72 @@ const DETAIL_MAX_CHARS: usize = 200;
 /// Returns the cleaned, length-capped message (with the leading keyword and any
 /// `Keyword - ` / `Status:` lead-in removed), or `None` when no keyword block is
 /// present or the message would be empty.
+///
+/// # Known limitations (non-default feeds only)
+///
+/// The three default feeds (Statuspage, Instatus, FlashDuty) are unaffected by
+/// these; they are residual graceful-degradation edges for arbitrary user feeds:
+///
+/// - A multi-paragraph message whose *later* paragraph happens to begin with a
+///   status-keyword word (so that paragraph parses as an update header) is
+///   truncated at that paragraph — the trailing paragraphs are dropped rather
+///   than folded in.
 pub fn extract_latest_detail(html: &str) -> Option<String> {
     let blocks = split_into_blocks(html);
 
     // The first block that carries a status keyword starts the latest update.
-    let kw_index = blocks
+    // A single pass yields both the block index and the keyword match (byte
+    // position + canonical keyword) so `find_status` is not recomputed.
+    let (kw_index, (pos, keyword)) = blocks
         .iter()
-        .position(|(_, stripped)| find_status(stripped).is_some())?;
+        .enumerate()
+        .find_map(|(i, (_, stripped))| find_status(stripped).map(|m| (i, m)))?;
 
     let mut parts: Vec<String> = Vec::new();
 
     // Text that follows the keyword within its own block (discards any leading
     // timestamp, which sits *before* the keyword and is thus dropped).
     let (_, kw_stripped) = &blocks[kw_index];
-    let (pos, keyword) = find_status(kw_stripped)?;
     let after = &kw_stripped[pos + keyword.len()..];
     if !after.trim().is_empty() {
         parts.push(after.to_string());
     }
 
-    // Fold in following blocks until the next keyword or a list/components
+    // Fold in following blocks until the next update header or a list/components
     // section, both of which mark the end of this update's prose.
+    //
+    // A list (`<ul`/`<li`) always stops the fold, even before any message text
+    // has been collected (so the OpenAI "Affected components" list never folds
+    // in). It is therefore checked first.
+    //
+    // A following block is a *new update header* when its status keyword is the
+    // first meaningful token (see `is_update_header`) — the shape every real
+    // header uses (Claude `ts <strong>kw</strong>`, OpenAI `<b>Status: kw</b>`,
+    // DeepSeek `<strong>Status:</strong> kw`). A prose block that merely mentions
+    // a keyword mid-sentence is NOT a header and is folded in.
+    //
+    // Safeguard: when the keyword block contributed no inline after-text (parts
+    // is still empty) and the very next non-list block *looks* like a header, it
+    // is usually the message for an empty-after-text header (the OpenAI/DeepSeek
+    // shape, e.g. `<b>Status: kw</b>` followed by `<b>Update:</b> msg`). Fold it
+    // anyway instead of dropping it — parts then becomes non-empty, so the next
+    // header block stops the loop normally.
+    //
+    // The exception is a block that is itself a *fresh emphasized stacked header*
+    // (`<strong>Status:</strong> kw`): its leading emphasis wraps only a label
+    // with the keyword OUTSIDE the span, marking it as a genuine older update.
+    // Folding it would merge two updates, so for that shape we break instead.
+    // A plain-prose message block (OpenAI/DeepSeek empty-after message) has no
+    // such leading emphasized label, so it still folds.
     for (raw, stripped) in &blocks[kw_index + 1..] {
-        if find_status(stripped).is_some() || contains_list(raw) {
+        if contains_list(raw) {
+            break;
+        }
+        if is_update_header(stripped) {
+            if parts.is_empty() && !is_emphasized_stacked_header(raw) {
+                parts.push(stripped.clone());
+                continue;
+            }
             break;
         }
         parts.push(stripped.clone());
@@ -374,6 +417,13 @@ fn split_into_blocks(html: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Upper bound on how far the tag matchers scan for a closing `>`. A real tag
+/// (`<p ...>`, `<b ...>`, …) is short; capping the scan keeps a crafted body
+/// like `<p <p <p …` (many openers with no `>`) from degrading to O(n²) over a
+/// multi-megabyte body. An opener with no `>` within the window is treated as a
+/// non-tag.
+const MAX_TAG_SCAN: usize = 256;
+
 /// If `s` starts with a `<p>`/`<p ...>`/`</p>`/`</p ...>` tag, return its byte
 /// length. `<pre>`, `<param>`, etc. are not matched (the char after `p` must be
 /// `>` or whitespace).
@@ -393,7 +443,10 @@ fn match_p_tag(s: &str) -> Option<usize> {
     if after >= b.len() || (b[after] != b'>' && !b[after].is_ascii_whitespace()) {
         return None;
     }
-    let gt = s[after..].find('>')?;
+    // Scan for the closing '>' within a bounded window (see `MAX_TAG_SCAN`). An
+    // opener with no '>' nearby is treated as a non-tag (returns None).
+    let limit = (after + MAX_TAG_SCAN).min(b.len());
+    let gt = b[after..limit].iter().position(|&c| c == b'>')?;
     Some(after + gt + 1)
 }
 
@@ -443,13 +496,196 @@ fn contains_list(raw: &str) -> bool {
         || find_ascii_ci(raw.as_bytes(), b"<li").is_some()
 }
 
-/// Collapse whitespace, drop a single leading `-`/`–`/`:` separator (and its
-/// surrounding spaces), and trim.
+/// Whether a *following* block begins a new update (and so ends the current
+/// update's prose). Position-based: a block is a header when its status keyword
+/// is the **first meaningful token** of the block's stripped text — that is, the
+/// text preceding the keyword is empty once an optional leading Statuspage
+/// timestamp and an optional leading `Status:` label are removed.
+///
+/// This flags all three real header shapes and rejects prose:
+/// - Claude   `Jun 24, 12:30 UTC Monitoring - msg` → after the timestamp, the
+///   keyword leads. ✓
+/// - OpenAI   `Status: Monitoring` → after the `Status:` label, the keyword
+///   leads. ✓
+/// - DeepSeek `Status: resolved` → likewise. ✓ (detected consistently with the
+///   keyword-block scan, so stacked DeepSeek updates stop instead of merging.)
+/// - Prose    `We are actively monitoring and a fix is deployed.` → the keyword
+///   is mid-sentence, not first, so this is folded, not treated as a boundary.
+fn is_update_header(stripped: &str) -> bool {
+    let Some((pos, _)) = find_status(stripped) else {
+        return false;
+    };
+    let before = &stripped[..pos];
+    // (a) A leading Statuspage timestamp (digits + month/zone tokens) is not
+    //     prose: if everything before the keyword looks like a timestamp, the
+    //     keyword leads.
+    if is_timestamp_like(before) {
+        return true;
+    }
+    // (b) Otherwise allow an optional leading `Status:` label; the keyword leads
+    //     iff nothing meaningful remains before it.
+    strip_status_label(before).trim().is_empty()
+}
+
+/// Whether the empty-parts safeguard's candidate block is a fresh *stacked*
+/// update header rather than the message for the current (empty-after) header.
+///
+/// Used **only** in the empty-parts branch to choose fold-vs-break. It keys on
+/// where the status keyword sits relative to the block's leading `<strong>`/`<b>`
+/// emphasis span:
+/// - `<strong>Status:</strong> resolved` — the emphasis wraps only the `Status:`
+///   label and the keyword sits OUTSIDE it. This is a genuine older stacked
+///   header, so the safeguard breaks (does not merge it in).
+/// - `<b>Update:</b> Traffic is recovering.` — the emphasis wraps the keyword
+///   (`Update`) itself; this is a message that merely bolds its own label, so it
+///   folds.
+/// - plain-prose message (no leading emphasis span) — folds.
+fn is_emphasized_stacked_header(raw: &str) -> bool {
+    let Some(inner) = leading_emphasis_inner(raw) else {
+        return false;
+    };
+    // The leading emphasis wraps a bare label (no keyword inside) → the keyword
+    // sits outside the span → this is a stacked header.
+    find_status(&strip_html(inner)).is_none()
+}
+
+/// If `raw` opens (after optional whitespace) with a `<strong>` or `<b>` span,
+/// return the raw inner slice up to the matching close tag (or end of input when
+/// the span is unterminated). Returns `None` when the block does not lead with
+/// an emphasis span.
+fn leading_emphasis_inner(raw: &str) -> Option<&str> {
+    let t = raw.trim_start();
+    for (name, close) in [("strong", "</strong>"), ("b", "</b>")] {
+        if let Some(open_len) = emphasis_open_len(t, name) {
+            let rest = &t[open_len..];
+            let end = find_ascii_ci(rest.as_bytes(), close.as_bytes()).unwrap_or(rest.len());
+            return Some(&rest[..end]);
+        }
+    }
+    None
+}
+
+/// If `s` starts with an opening `<NAME>` / `<NAME ...>` tag (ASCII
+/// case-insensitive; `NAME` must be followed by `>` or whitespace so `<b>`
+/// matches but `<blockquote>`/`<br>` do not), return the byte length of the
+/// opener through its `>`. The scan for the closing `>` is bounded (like
+/// `match_p_tag`) so a crafted opener cannot degrade to a long scan.
+fn emphasis_open_len(s: &str, name: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'<') {
+        return None;
+    }
+    let mut i = 1;
+    for &nc in name.as_bytes() {
+        if i >= b.len() || (b[i] | 0x20) != (nc | 0x20) {
+            return None;
+        }
+        i += 1;
+    }
+    if i >= b.len() || (b[i] != b'>' && !b[i].is_ascii_whitespace()) {
+        return None;
+    }
+    let limit = (i + MAX_TAG_SCAN).min(b.len());
+    let gt = b[i..limit].iter().position(|&c| c == b'>')?;
+    Some(i + gt + 1)
+}
+
+/// Whether `s` looks like a leading Statuspage timestamp: it must contain a
+/// clock time (a `:` flanked by digits, e.g. `12:30`) and consist solely of
+/// characters plausibly part of a timestamp — letters (month names, `UTC`/`PDT`),
+/// digits, and the punctuation `,` `:` `/` `+` `-` `.` plus whitespace.
+///
+/// The clock-time requirement is what keeps prose lead-ins like `By 3pm, ` or
+/// `Within 5 minutes ` (a digit but no `HH:MM`) from being mistaken for a
+/// timestamp, which would otherwise flag a prose block as an update header. Real
+/// Statuspage timestamps ("Jun 24, 12:30 UTC") always carry a clock time and so
+/// still qualify.
+fn is_timestamp_like(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() {
+        return false;
+    }
+    let mut has_clock = false;
+    let mut prev_digit = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        let ok = c.is_ascii_alphanumeric()
+            || c.is_ascii_whitespace()
+            || matches!(c, ',' | ':' | '/' | '+' | '-' | '.');
+        if !ok {
+            return false;
+        }
+        // A clock time is a ':' with a digit on both sides (e.g. "12:30").
+        if c == ':' && prev_digit && chars.peek().is_some_and(char::is_ascii_digit) {
+            has_clock = true;
+        }
+        prev_digit = c.is_ascii_digit();
+    }
+    has_clock
+}
+
+/// Strip an optional leading `Status` label (case-insensitive) followed by a
+/// `:` (after optional whitespace), returning the remainder. Anything that is
+/// not exactly such a label is returned unchanged.
+///
+/// Deliberately distinct from [`strip_leading_status_label`], do NOT merge them:
+/// this header-detection helper matches *only* the literal `Status` and tolerates
+/// whitespace before the colon (`Status :`), whereas the other also matches any
+/// [`STATUS_KEYWORDS`] entry and requires the pre-colon word to be a single run
+/// of ASCII letters (no interior whitespace). Folding them would change which
+/// `before`-the-keyword prefixes [`is_update_header`] accepts.
+fn strip_status_label(s: &str) -> &str {
+    let t = s.trim_start();
+    if let Some(head) = t.get(..6)
+        && head.eq_ignore_ascii_case("status")
+        && let Some(body) = t[6..].trim_start().strip_prefix(':')
+    {
+        return body.trim_start();
+    }
+    s
+}
+
+/// Collapse whitespace, drop a single leading status/update label and a single
+/// leading `-`/`–`/`—`/`:` separator (and surrounding spaces), and trim.
 fn clean_detail(s: &str) -> String {
     let collapsed = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let trimmed = collapsed.trim();
-    let stripped = trimmed.strip_prefix(['-', '–', ':']).unwrap_or(trimmed);
+    // A folded empty-after-text header's message block can begin with its own
+    // "Status:"/"Update:"-style label (e.g. OpenAI `<b>Update:</b> msg` →
+    // "Update: msg"); strip it so the rendered detail does not leak the label.
+    let unlabeled = strip_leading_status_label(trimmed);
+    let stripped = unlabeled
+        .strip_prefix(['-', '–', '—', ':'])
+        .unwrap_or(unlabeled);
     stripped.trim().to_string()
+}
+
+/// Strip a single leading `<Word>:` label (after optional whitespace) when
+/// `<Word>` is the literal `Status` or one of the [`STATUS_KEYWORDS`] (e.g.
+/// `Update:`, `Monitoring:`). Conservative: an arbitrary `Word:` prefix from
+/// real message prose (e.g. `Note:`) is left untouched, and a label is only
+/// recognized when the word is a single run of ASCII letters.
+///
+/// Deliberately distinct from [`strip_status_label`], do NOT merge them: this
+/// `clean_detail` helper also accepts any [`STATUS_KEYWORDS`] entry and rejects
+/// whitespace before the colon, whereas the header-detection helper matches only
+/// the literal `Status` and tolerates `Status :`. See that function for why the
+/// split matters.
+fn strip_leading_status_label(s: &str) -> &str {
+    let t = s.trim_start();
+    let Some(colon) = t.find(':') else {
+        return s;
+    };
+    let word = &t[..colon];
+    let is_label = !word.is_empty()
+        && word.bytes().all(|b| b.is_ascii_alphabetic())
+        && (word.eq_ignore_ascii_case("status")
+            || STATUS_KEYWORDS.iter().any(|k| word.eq_ignore_ascii_case(k)));
+    if is_label {
+        t[colon + ':'.len_utf8()..].trim_start()
+    } else {
+        s
+    }
 }
 
 /// Truncate `s` to at most `max` characters (char-safe), appending `…` when the
@@ -605,6 +841,212 @@ mod tests {
         assert_eq!(result.chars().count(), DETAIL_MAX_CHARS + 1);
         assert!(result.ends_with('…'));
         assert!(result.starts_with('あ'));
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_keyword_in_prose_openai_shape() {
+        // OpenAI/Instatus shape where the message prose itself contains a status
+        // keyword word ("monitoring"). The prose block carries no emphasis tag, so
+        // it must be folded in, not mistaken for a new update header and dropped.
+        let html = "<b>Status: Monitoring</b><br/><br/>A fix has been deployed and we are monitoring the results.<br/><br/><b>Affected components</b><ul><li>API</li></ul>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("A fix has been deployed and we are monitoring the results.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_keyword_in_prose_deepseek_shape() {
+        // DeepSeek/FlashDuty shape where the separate message block contains the
+        // keyword word ("resolved"). With no emphasis tag it is prose, not a
+        // header, and must be folded in.
+        let html = "<p><strong>Status:</strong> resolved</p><p>The incident is resolved and service is restored.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("The incident is resolved and service is restored.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_bolded_prose_with_keyword_openai_shape() {
+        // OpenAI/Instatus shape where the message block BOLDS an unrelated word
+        // (`<b>actively</b>`) AND restates a status keyword ("monitoring") as an
+        // ordinary mid-sentence word. The keyword is outside the emphasis span, so
+        // the block is prose, not a new header: it must be folded in (not dropped),
+        // and the `<ul>` components section must still be excluded.
+        let html = "<b>Status: Monitoring</b><br/><br/>We are <b>actively</b> monitoring and a fix is deployed.<br/><br/><b>Affected components</b><ul><li>API</li></ul>";
+        let detail = extract_latest_detail(html).expect("message must fold, not drop");
+        assert!(
+            detail.contains("actively monitoring"),
+            "folded message lost: {detail:?}"
+        );
+        assert!(
+            !detail.contains("Affected components"),
+            "leaked list header: {detail:?}"
+        );
+        assert!(!detail.contains("API"), "leaked component list: {detail:?}");
+        assert_eq!(detail, "We are actively monitoring and a fix is deployed.");
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_bolded_prose_with_keyword_deepseek_shape() {
+        // DeepSeek/FlashDuty shape: the separate message block bolds a word
+        // (`<b>fully</b>`) and also contains the keyword "resolved" as prose. The
+        // keyword is outside the bold span, so the block folds in.
+        let html = "<p><strong>Status:</strong> resolved</p><p>Service is <b>fully</b> resolved and operational.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("Service is fully resolved and operational.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_bolded_keyword_after_empty_header_openai_shape() {
+        // Regression for the drop bug: an empty-after-text header
+        // (`<b>Status: Monitoring</b>`) is followed by a message block that
+        // itself bolds a keyword word (`<b>Update:</b> Traffic ...`). Under a
+        // bold-based predicate that block was misclassified as a new header and
+        // the whole message was dropped (detail = None). With position-based
+        // detection plus the fold-when-parts-empty safeguard it must fold in,
+        // and the trailing `<ul>` components must still be excluded.
+        let html = "<b>Status: Monitoring</b><br/><br/><b>Update:</b> Traffic is recovering.<br/><br/><b>Affected components</b><ul><li>API</li></ul>";
+        // Exact string pins the CHANGE 2 label-strip fix: the folded block's own
+        // leading "Update:" label must be removed (no "Update: " leak) and the
+        // trailing components list must be excluded.
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("Traffic is recovering.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_message_ending_in_bolded_keyword() {
+        // A message that ends in a bolded keyword (`...is now <strong>resolved</strong>.`)
+        // following an empty-after-text header must fold, not be dropped: the
+        // keyword is the last token, not the first, so the block is prose.
+        let html = "<b>Status: Monitoring</b><br/><br/>Traffic is recovering and the incident is now <strong>resolved</strong>.";
+        let detail = extract_latest_detail(html).expect("message must fold, not drop");
+        assert!(
+            detail.starts_with("Traffic is recovering and the incident is now resolved"),
+            "folded message lost or mangled: {detail:?}"
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_stops_at_stacked_deepseek_header_no_merge() {
+        // Regression for the merge bug: two stacked DeepSeek-shape updates whose
+        // headers put the keyword OUTSIDE the emphasis span
+        // (`<strong>Status:</strong> kw`). Only the latest update's message is
+        // surfaced; the second `Status:` header must stop the fold rather than
+        // merge the older update in.
+        let html = "<p><strong>Status:</strong> resolved</p><p>The service is back to normal.</p>\
+<p><strong>Status:</strong> identified</p><p>We found the root cause.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("The service is back to normal.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_terse_latest_then_stacked_header_no_merge() {
+        // CHANGE 3 regression: the LATEST update is terse (keyword only, no
+        // message), immediately followed by an older emphasized stacked header
+        // and its message. The empty-parts safeguard must NOT fold the older
+        // header in (which would merge two updates): it recognizes the leading
+        // emphasized `Status:` label (keyword OUTSIDE the span) as a fresh header
+        // and breaks, yielding an empty -> None detail rather than a merge.
+        let html = "<p><strong>Status:</strong> monitoring</p><p><strong>Status:</strong> identified</p><p>We found the cause.</p>";
+        let detail = extract_latest_detail(html);
+        assert!(
+            detail.as_deref().is_none_or(str::is_empty),
+            "terse latest update must not merge the older stacked update: {detail:?}"
+        );
+        let detail = detail.unwrap_or_default();
+        assert!(
+            !detail.contains("identified"),
+            "merged older keyword: {detail:?}"
+        );
+        assert!(
+            !detail.contains("We found the cause"),
+            "merged older message: {detail:?}"
+        );
+    }
+
+    #[test]
+    fn is_timestamp_like_requires_a_clock_time() {
+        // CHANGE 1: a real Statuspage timestamp (with HH:MM) qualifies.
+        assert!(is_timestamp_like("Jun 24, 12:30 UTC "));
+        assert!(is_timestamp_like("12:30"));
+        // Prose lead-ins that merely contain a digit but no clock time must not.
+        assert!(!is_timestamp_like("By 3pm, "));
+        assert!(!is_timestamp_like("Within 5 minutes "));
+        // A bare date with no time also no longer qualifies.
+        assert!(!is_timestamp_like("Jun 24 "));
+    }
+
+    #[test]
+    fn is_timestamp_like_prose_prefix_is_not_a_header_boundary() {
+        // End-to-end: a message paragraph beginning "By 3pm, we will <keyword>"
+        // must fold as prose (not be mistaken for a timestamped header), so the
+        // earlier message keeps it.
+        let html = "<p><strong>Monitoring</strong> - working on it.</p><p>By 3pm, we expect monitoring to confirm recovery.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("working on it. By 3pm, we expect monitoring to confirm recovery.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_folds_inline_and_following_block() {
+        // Inline post-keyword prose in the keyword block PLUS a following
+        // non-keyword block: both must be combined into the detail.
+        let html = "<p><strong>Monitoring</strong> - first part</p><p>second part</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("first part second part")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_strips_leading_colon_separator() {
+        // Post-keyword text beginning with ": " has the separator stripped.
+        let html = "<p><strong>Monitoring</strong>: the fix is live.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("the fix is live.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_strips_leading_en_dash_separator() {
+        // Post-keyword text beginning with "– " (en-dash) has it stripped.
+        let html = "<p><strong>Monitoring</strong> – the fix is live.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("the fix is live.")
+        );
+    }
+
+    #[test]
+    fn extract_latest_detail_keeps_pre_and_lone_br_in_keyword_block() {
+        // `<pre>` must not be matched as a `<p>` split point, and a lone `<br>` is
+        // deliberately not a split point, so the whole keyword block stays intact.
+        let html = "<p><strong>Monitoring</strong> - text with <pre>code</pre> and a lone <br> break here.</p>";
+        assert_eq!(
+            extract_latest_detail(html).as_deref(),
+            Some("text with code and a lone break here.")
+        );
+    }
+
+    #[test]
+    fn truncate_chars_returns_exact_max_unchanged() {
+        // A string of EXACTLY `max` chars must be returned unchanged with no
+        // ellipsis appended (guards the boundary against an off-by-one).
+        let exact = "a".repeat(DETAIL_MAX_CHARS);
+        let out = truncate_chars(&exact, DETAIL_MAX_CHARS);
+        assert_eq!(out, exact);
+        assert!(!out.ends_with('…'));
+        assert_eq!(out.chars().count(), DETAIL_MAX_CHARS);
     }
 
     #[test]
@@ -766,6 +1208,8 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].title, "");
         assert_eq!(entries[0].link, None);
+        // No <content>/<summary> body, so there is no message prose to extract.
+        assert!(entries[0].detail.is_none());
     }
 
     #[test]

@@ -685,6 +685,40 @@ mod tests {
     }
 
     #[test]
+    fn build_body_renders_keyword_message_for_all_default_feed_formats() {
+        // End-to-end acceptance: each of the three real default-feed formats,
+        // once parsed, composes through `build_body` into the final
+        // "Keyword — message\n<link>" notification body. This closes the gap
+        // between the per-field fixture assertions and the body composition.
+        let cases = [
+            (
+                &include_bytes!("../tests/fixtures/claude_stacked.atom")[..],
+                "Monitoring — A fix has been implemented and we are monitoring the results.",
+            ),
+            (
+                &include_bytes!("../tests/fixtures/openai.atom")[..],
+                "Monitoring — A fix has been deployed and traffic is recovering.",
+            ),
+            (
+                &include_bytes!("../tests/fixtures/deepseek.atom")[..],
+                "Resolved — 服务已恢复正常，所有功能可正常使用。 Service has returned to normal and all features are available.",
+            ),
+        ];
+
+        for (xml, expected_first_line) in cases {
+            let entries = parse_feed(xml, TEST_BASE_URI).expect("fixture should parse");
+            let entry = &entries[0];
+            let body = crate::notify::build_body(
+                entry.status.as_deref(),
+                entry.detail.as_deref(),
+                entry.link.as_deref(),
+            );
+            let first_line = body.lines().next().expect("body has a first line");
+            assert_eq!(first_line, expected_first_line);
+        }
+    }
+
+    #[test]
     fn strip_html_passes_bare_ampersand_verbatim() {
         // A bare '&' (not the start of a recognized entity) must pass through
         // verbatim without panicking.

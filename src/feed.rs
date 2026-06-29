@@ -31,6 +31,9 @@ pub struct Entry {
     /// Parsed status keyword (e.g. "Monitoring"), if one was found in the
     /// status text.
     pub status: Option<String>,
+    /// Latest update's message prose (keyword-stripped, length-capped), if one
+    /// could be extracted from the status text.
+    pub detail: Option<String>,
 }
 
 /// Parse raw Atom/RSS XML into normalized [`Entry`]s.
@@ -81,7 +84,11 @@ pub fn parse_feed(xml: &[u8], base_uri: &str) -> anyhow::Result<Vec<Entry>> {
             .and_then(|c| c.body)
             .or_else(|| entry.summary.map(|s| s.content));
         let status = status_text
-            .and_then(|text| find_status(&strip_html(&text)).map(|(_, k)| k.to_string()));
+            .as_deref()
+            .and_then(|text| find_status(&strip_html(text)).map(|(_, k)| k.to_string()));
+        // Detail extraction runs on the raw HTML (block boundaries depend on
+        // tags), so it uses `status_text` before stripping.
+        let detail = status_text.as_deref().and_then(extract_latest_detail);
 
         entries.push(Entry {
             id: entry.id,
@@ -89,6 +96,7 @@ pub fn parse_feed(xml: &[u8], base_uri: &str) -> anyhow::Result<Vec<Entry>> {
             title,
             link,
             status,
+            detail,
         });
     }
 
@@ -618,6 +626,10 @@ mod tests {
             Some("https://status.example.com/incidents/abc123")
         );
         assert_eq!(entry.status.as_deref(), Some("Monitoring"));
+        assert_eq!(
+            entry.detail.as_deref(),
+            Some("A fix has been deployed and we are monitoring the results.")
+        );
     }
 
     #[test]

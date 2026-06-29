@@ -190,6 +190,7 @@ mod tests {
             title: "An incident".to_string(),
             link: Some("https://status.example.com/incidents/abc".to_string()),
             status: Some("Investigating".to_string()),
+            detail: None,
         }
     }
 

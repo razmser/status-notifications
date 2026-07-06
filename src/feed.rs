@@ -3,7 +3,10 @@
 //! Pure helpers (`strip_html`, `find_status`) are factored out so they can be
 //! unit-tested without any network or notification side effects. `parse_feed`
 //! turns raw Atom/RSS into normalized [`Entry`]s, and `fetch_and_parse` wraps it
-//! with a bounded HTTP GET over a shared browser-emulating [`wreq::Client`].
+//! with a bounded, retried HTTP GET over a shared browser-emulating
+//! [`wreq::Client`].
+
+use std::time::Duration as StdDuration;
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
@@ -103,41 +106,159 @@ pub fn parse_feed(xml: &[u8], base_uri: &str) -> anyhow::Result<Vec<Entry>> {
     Ok(entries)
 }
 
+/// How many times a single feed fetch is attempted before giving up.
+///
+/// The daemon's typical environment is a fake-IP proxy that drops individual
+/// streams and times out cold connections often enough that a single attempt is
+/// too brittle: one blip would skip the feed for that whole tick and miss an
+/// incident update. Retrying on a fresh connection clears the vast majority of
+/// these. Three attempts bounds the worst case while keeping recovery quick.
+const FETCH_MAX_ATTEMPTS: u8 = 3;
+
+/// Backoff between fetch attempts. A fixed (non-jittered) short sleep: the
+/// failure we are papering over is a brief proxy reset that clears in well under
+/// this, so the next attempt usually succeeds without adding meaningful latency.
+const FETCH_RETRY_BACKOFF: StdDuration = StdDuration::from_millis(1500);
+
 /// Fetch a feed over the shared browser-emulating client and parse it into
 /// [`Entry`]s.
 ///
 /// The `client` is built once by the caller with a browser TLS/HTTP2 fingerprint
 /// (some status hosts reset non-browser TLS handshakes); the async request is
-/// driven to completion on the caller's `runtime`. Non-2xx responses are turned
-/// into errors via `error_for_status`. The body is read as raw bytes (capped at
+/// driven to completion on the caller's `runtime`. Transient failures — a
+/// transport error (timeout, broken pipe, TLS reset), a mid-body reset, or an
+/// HTTP 5xx — are retried up to [`FETCH_MAX_ATTEMPTS`] times with
+/// [`FETCH_RETRY_BACKOFF`] (see [`retry_loop`]); a deterministic HTTP 4xx is
+/// returned immediately. The body is read as raw bytes (capped at
 /// [`MAX_BODY_BYTES`]) so non-UTF-8 feeds — which declare their encoding in the
-/// XML prolog — parse correctly.
+/// XML prolog — parse correctly. Parsing itself is not retried: a parse failure
+/// is deterministic, so retrying cannot help.
 pub fn fetch_and_parse(
     client: &wreq::Client,
     runtime: &tokio::runtime::Runtime,
     feed: &Feed,
 ) -> anyhow::Result<Vec<Entry>> {
-    let body = runtime.block_on(async {
-        let response = client
-            .get(&feed.url)
-            .send()
-            .await
-            .with_context(|| format!("fetching feed {} ({})", feed.name, feed.url))?
-            .error_for_status()
-            .with_context(|| format!("feed {} returned an error status", feed.name))?;
-
-        let bytes = response
-            .bytes()
-            .await
-            .with_context(|| format!("reading feed body {} ({})", feed.name, feed.url))?;
-        anyhow::Ok(bytes)
-    })?;
+    let body = fetch_with_retry(client, runtime, feed)?;
 
     // Defensive cap: keep at most MAX_BODY_BYTES before handing to the parser.
     let body = &body[..body.len().min(MAX_BODY_BYTES)];
 
     parse_feed(body, &feed.url)
         .with_context(|| format!("parsing feed {} ({})", feed.name, feed.url))
+}
+
+/// The outcome of one fetch attempt, split so [`retry_loop`] can tell transient
+/// failures (worth retrying) from deterministic ones (not).
+enum FetchAttempt {
+    /// Body bytes of a successful response.
+    Ok(Vec<u8>),
+    /// Transient failure: a transport error, a mid-body reset, or an HTTP 5xx.
+    /// Retrying on a fresh connection usually clears it.
+    Retry(anyhow::Error),
+    /// Deterministic failure: an HTTP 4xx (e.g. 404). Another attempt cannot
+    /// help, so it is returned to the caller without retrying.
+    Fatal(anyhow::Error),
+}
+
+/// Fetch the feed body, retrying transient failures via [`retry_loop`].
+fn fetch_with_retry(
+    client: &wreq::Client,
+    runtime: &tokio::runtime::Runtime,
+    feed: &Feed,
+) -> anyhow::Result<Vec<u8>> {
+    retry_loop(FETCH_MAX_ATTEMPTS, FETCH_RETRY_BACKOFF, || {
+        fetch_once(client, runtime, feed)
+    })
+}
+
+/// Drive `attempt` up to `max_attempts` times, retrying on
+/// [`FetchAttempt::Retry`] after sleeping `backoff`, and returning immediately
+/// on [`FetchAttempt::Ok`] or [`FetchAttempt::Fatal`]. After the final attempt
+/// the last error is returned.
+///
+/// Factored out — with `backoff` and `attempt` taken as parameters — so the
+/// retry policy can be unit-tested with canned [`FetchAttempt`] sequences and a
+/// zero-length backoff: no network, no sleeping.
+fn retry_loop<F>(max_attempts: u8, backoff: StdDuration, mut attempt: F) -> anyhow::Result<Vec<u8>>
+where
+    F: FnMut() -> FetchAttempt,
+{
+    let mut last_err: Option<anyhow::Error> = None;
+    for n in 1..=max_attempts {
+        match attempt() {
+            FetchAttempt::Ok(bytes) => return Ok(bytes),
+            FetchAttempt::Fatal(err) => return Err(err),
+            FetchAttempt::Retry(err) => {
+                log::debug!("fetch attempt {n}/{max_attempts} failed (will retry): {err:#}");
+                last_err = Some(err);
+                if n < max_attempts {
+                    std::thread::sleep(backoff);
+                }
+            }
+        }
+    }
+    Err(last_err.expect("max_attempts >= 1 guarantees at least one attempt ran"))
+}
+
+/// Perform a single fetch attempt and classify its outcome.
+///
+/// Each failure site tags its result transient ([`FetchAttempt::Retry`]) or
+/// deterministic ([`FetchAttempt::Fatal`]) at the point where the distinction is
+/// known, rather than by introspecting the resulting error afterwards: a request
+/// that never produced a response, a 5xx, or a mid-body reset is transient; a
+/// 4xx is not.
+fn fetch_once(
+    client: &wreq::Client,
+    runtime: &tokio::runtime::Runtime,
+    feed: &Feed,
+) -> FetchAttempt {
+    // Every failure carries whether it is worth retrying.
+    let outcome: Result<Vec<u8>, (anyhow::Error, bool)> = runtime.block_on(async {
+        let response = match client.get(&feed.url).send().await {
+            Ok(response) => response,
+            Err(err) => {
+                return Err((
+                    anyhow::Error::new(err)
+                        .context(format!("fetching feed {} ({})", feed.name, feed.url)),
+                    true,
+                ));
+            }
+        };
+
+        let status = response.status();
+        if status.is_client_error() {
+            return Err((
+                anyhow::anyhow!("feed {} returned client error status {}", feed.name, status),
+                false,
+            ));
+        }
+        if status.is_server_error() {
+            return Err((
+                anyhow::anyhow!("feed {} returned server error status {}", feed.name, status),
+                true,
+            ));
+        }
+
+        match response.bytes().await {
+            Ok(bytes) => Ok(bytes.to_vec()),
+            Err(err) => Err((
+                anyhow::Error::new(err)
+                    .context(format!("reading feed body {} ({})", feed.name, feed.url)),
+                true,
+            )),
+        }
+    });
+
+    match outcome {
+        Ok(bytes) => FetchAttempt::Ok(bytes),
+        Err((err, retryable)) => {
+            if retryable {
+                FetchAttempt::Retry(err)
+            } else {
+                FetchAttempt::Fatal(err)
+            }
+        }
+    }
 }
 
 /// Ordered set of status keywords. The first one (by position in the text)
@@ -702,6 +823,67 @@ fn truncate_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_loop_succeeds_on_first_attempt() {
+        let calls = std::cell::RefCell::new(0u32);
+        let body = retry_loop(3, std::time::Duration::ZERO, || {
+            *calls.borrow_mut() += 1;
+            FetchAttempt::Ok(vec![1, 2, 3])
+        })
+        .expect("first attempt succeeds");
+        assert_eq!(body, vec![1, 2, 3]);
+        assert_eq!(*calls.borrow(), 1, "must not retry after success");
+    }
+
+    #[test]
+    fn retry_loop_retries_then_succeeds() {
+        let calls = std::cell::RefCell::new(0u32);
+        let body = retry_loop(3, std::time::Duration::ZERO, || {
+            let mut c = calls.borrow_mut();
+            *c += 1;
+            if *c < 3 {
+                FetchAttempt::Retry(anyhow::anyhow!("transient"))
+            } else {
+                FetchAttempt::Ok(vec![9])
+            }
+        })
+        .expect("third attempt succeeds");
+        assert_eq!(body, vec![9]);
+        assert_eq!(*calls.borrow(), 3);
+    }
+
+    #[test]
+    fn retry_loop_exhausts_and_returns_last_error() {
+        let calls = std::cell::RefCell::new(0u32);
+        let err = retry_loop(3, std::time::Duration::ZERO, || {
+            *calls.borrow_mut() += 1;
+            FetchAttempt::Retry(anyhow::anyhow!("still transient"))
+        })
+        .expect_err("all attempts fail");
+        assert_eq!(*calls.borrow(), 3, "must try exactly max_attempts times");
+        assert!(
+            format!("{err:#}").contains("still transient"),
+            "last error must be surfaced: {err:#}"
+        );
+    }
+
+    #[test]
+    fn retry_loop_fatal_does_not_retry() {
+        // A deterministic 4xx must short-circuit after a single attempt: another
+        // request cannot change a 404.
+        let calls = std::cell::RefCell::new(0u32);
+        let err = retry_loop(3, std::time::Duration::ZERO, || {
+            *calls.borrow_mut() += 1;
+            FetchAttempt::Fatal(anyhow::anyhow!("404 not found"))
+        })
+        .expect_err("fatal error returned");
+        assert_eq!(*calls.borrow(), 1, "fatal must not be retried");
+        assert!(
+            format!("{err:#}").contains("404"),
+            "fatal error surfaced: {err:#}"
+        );
+    }
 
     /// Representative feed URL used as the feed-rs base URI in parse tests. All
     /// fixtures carry explicit `<id>`s, so the base URI does not affect their

@@ -18,8 +18,15 @@ use crate::feed::{Entry, fetch_and_parse};
 use crate::notify;
 use crate::state::{SeenKey, SeenStore};
 
-/// Global HTTP timeout for a feed fetch.
-const HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(10);
+/// Global HTTP timeout for a single feed-fetch attempt.
+///
+/// The daemon typically runs behind a fake-IP proxy whose cold connect (TLS +
+/// tunnel setup) takes a few seconds and varies with upstream latency; the
+/// former 10s timed out routinely on a slow tick. 20s comfortably covers the
+/// observed worst case while staying well under the 60s poll interval. This caps
+/// a *single* attempt — `fetch_and_parse` retries transient failures on top of
+/// it.
+const HTTP_TIMEOUT: StdDuration = StdDuration::from_secs(20);
 
 /// Sleep granularity for [`interruptible_sleep`]: poll the shutdown flag this
 /// often so a shutdown is observed promptly without busy-waiting.
@@ -111,7 +118,8 @@ fn interruptible_sleep(total: StdDuration, shutdown: &AtomicBool) {
 /// Builds, once, a single-threaded tokio runtime plus a shared browser-emulating
 /// [`wreq::Client`] (some status hosts reset non-browser TLS handshakes). Then on
 /// each tick it polls every feed in turn — checking `shutdown` before and between
-/// feeds so a hung fetch can't stretch shutdown to `feeds × timeout` — prunes and
+/// feeds so a single slow feed can't stretch shutdown beyond its own retry
+/// budget (attempts × timeout), and never blocks the others — prunes and
 /// persists the seen-store, and sleeps interruptibly until the next tick. A final
 /// `save` is always performed before returning on shutdown.
 ///

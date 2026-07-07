@@ -62,7 +62,8 @@ pub fn build_body(status: Option<&str>, detail: Option<&str>, link: Option<&str>
 /// delivery succeeded and `false` if it failed. Delivery errors are logged and
 /// swallowed (never panic/propagate) so a failing send can't crash the poll
 /// loop; the returned `bool` lets the caller decide whether to mark the entry as
-/// seen.
+/// seen. A delivered notification is also mirrored into the log at `info` so a
+/// missed banner can be distinguished from a tool that never fired.
 pub fn send(title: &str, subtitle: &str, body: &str) -> bool {
     let mut notification = Notification::new();
     notification.sound(Sound::Default);
@@ -74,7 +75,13 @@ pub fn send(title: &str, subtitle: &str, body: &str) -> bool {
     };
 
     match send_notification(title, subtitle, body, Some(&notification)) {
-        Ok(_) => true,
+        Ok(_) => {
+            match subtitle {
+                Some(sub) => log::info!("notified {title} ({sub}): {body}"),
+                None => log::info!("notified {title}: {body}"),
+            }
+            true
+        }
         Err(e) => {
             log::warn!("failed to send notification {title:?}: {e}");
             false

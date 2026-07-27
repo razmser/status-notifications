@@ -70,6 +70,7 @@ fn process_feed(
     seen: &mut SeenStore,
     now: DateTime<Utc>,
     max_age_minutes: i64,
+    sound: bool,
 ) {
     let entries = match fetch_and_parse(client, runtime, feed) {
         Ok(entries) => entries,
@@ -91,7 +92,7 @@ fn process_feed(
         );
         // Only record the entry as seen if delivery actually succeeded; a
         // transient send failure must not permanently suppress this update.
-        if notify::send(&feed.name, &entry.title, &body) {
+        if notify::send(&feed.name, &entry.title, &body, sound) {
             seen.insert(seen_key(&entry));
         }
     }
@@ -164,7 +165,15 @@ pub fn run(config: &Config, seen: &mut SeenStore, seen_path: &Path, shutdown: &A
             if shutdown.load(Ordering::Relaxed) {
                 break;
             }
-            process_feed(&client, &runtime, feed, seen, now, config.max_age_minutes);
+            process_feed(
+                &client,
+                &runtime,
+                feed,
+                seen,
+                now,
+                config.max_age_minutes,
+                config.notification_sound,
+            );
         }
 
         seen.prune(now, config.max_age_minutes);

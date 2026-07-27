@@ -42,6 +42,11 @@ pub struct Config {
     /// unrecognized name fails to parse (loud exit), like any other bad key.
     #[serde(default = "default_emulation")]
     pub tls_emulation: Emulation,
+    /// Whether a delivered banner plays the default system alert sound.
+    /// Defaults to `false` — status updates arrive silently, since a feed can
+    /// emit several updates for one incident in quick succession.
+    #[serde(default)]
+    pub notification_sound: bool,
     #[serde(default)]
     pub feeds: Vec<Feed>,
 }
@@ -52,6 +57,7 @@ pub fn default_config() -> Config {
         poll_interval_secs: default_poll_interval_secs(),
         max_age_minutes: default_max_age_minutes(),
         tls_emulation: default_emulation(),
+        notification_sound: false,
         feeds: vec![
             Feed {
                 name: "OpenAI".to_string(),
@@ -170,6 +176,31 @@ mod tests {
         assert_eq!(config.max_age_minutes, 10);
         assert_eq!(config.feeds.len(), 1);
         assert_eq!(config.feeds[0].name, "OpenAI");
+    }
+
+    #[test]
+    fn notification_sound_defaults_to_silent() {
+        // An existing config.toml written before the field was introduced must
+        // keep working, and must land on the silent default.
+        let toml_str = r#"
+            [[feeds]]
+            name = "OpenAI"
+            url = "https://status.openai.com/feed.atom"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        assert!(!config.notification_sound);
+    }
+
+    #[test]
+    fn notification_sound_can_be_enabled() {
+        let toml_str = r#"
+            notification_sound = true
+            [[feeds]]
+            name = "OpenAI"
+            url = "https://status.openai.com/feed.atom"
+        "#;
+        let config: Config = toml::from_str(toml_str).expect("parse");
+        assert!(config.notification_sound);
     }
 
     #[test]

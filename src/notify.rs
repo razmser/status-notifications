@@ -58,15 +58,19 @@ pub fn build_body(status: Option<&str>, detail: Option<&str>, link: Option<&str>
 /// Deliver a single native notification.
 ///
 /// `title` is the feed name, `subtitle` the entry title, `body` the
-/// status/detail/link block. Plays the default system sound. Returns `true` if
+/// status/detail/link block. `sound` (the `notification_sound` config field)
+/// selects the default system alert tone; when `false` no sound is requested at
+/// all, so the banner arrives silently. Returns `true` if
 /// delivery succeeded and `false` if it failed. Delivery errors are logged and
 /// swallowed (never panic/propagate) so a failing send can't crash the poll
 /// loop; the returned `bool` lets the caller decide whether to mark the entry as
 /// seen. A delivered notification is also mirrored into the log at `info` so a
 /// missed banner can be distinguished from a tool that never fired.
-pub fn send(title: &str, subtitle: &str, body: &str) -> bool {
+pub fn send(title: &str, subtitle: &str, body: &str, sound: bool) -> bool {
     let mut notification = Notification::new();
-    notification.sound(Sound::Default);
+    if sound {
+        notification.sound(Sound::Default);
+    }
 
     let subtitle = if subtitle.is_empty() {
         None

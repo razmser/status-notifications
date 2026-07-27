@@ -50,6 +50,7 @@ The default file looks like this:
 poll_interval_secs = 60
 max_age_minutes = 10
 tls_emulation = "chrome_137"
+notification_sound = false
 
 [[feeds]]
 name = "OpenAI"
@@ -80,6 +81,10 @@ url = "https://status.deepseek.com/feed.atom"
   name](https://docs.rs/wreq-util/latest/wreq_util/enum.Emulation.html), e.g.
   `tls_emulation = "safari_17.0"` or `"firefox_136"`. An unrecognized name fails
   to parse (the daemon logs the error and exits), like any other bad key.
+- `notification_sound` (default `false`) — whether a banner plays the default
+  system alert sound. Off by default: one incident can produce several updates in
+  quick succession, and a silent banner still shows up in Notification Center.
+  Set `notification_sound = true` to hear each one.
 - `[[feeds]]` — one block per feed, each with:
   - `name` — shown as the notification title.
   - `url` — the Atom or RSS feed URL of the status page.

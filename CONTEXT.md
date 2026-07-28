@@ -1,7 +1,7 @@
 # status-notifications
 
-A daemon that polls Atom/RSS status-page feeds (OpenAI, Claude, and DeepSeek by
-default) and delivers a notification for each new incident or incident update.
+A daemon that polls Atom/RSS status-page feeds (OpenAI, Claude, DeepSeek, and
+Moonshot AI by default) and delivers a notification for each new incident or incident update.
 macOS today; Linux is planned (`mac-notification-sys` behind a feature, launchd
 replaced by systemd). The domain language is about the feeds it polls, the
 entries it extracts, and the sinks it pushes notifications to.

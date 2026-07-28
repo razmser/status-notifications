@@ -1,7 +1,7 @@
 # status-notifications
 
-A small macOS daemon that polls Atom/RSS status-page feeds (OpenAI, Claude, and
-DeepSeek by default) and shows a native macOS notification for each new incident
+A small macOS daemon that polls Atom/RSS status-page feeds (OpenAI, Claude,
+DeepSeek, and Moonshot AI by default) and shows a native macOS notification for each new incident
 or incident update. Instead of manually checking provider status pages, you get
 a banner the moment an incident opens, progresses, or resolves.
 
@@ -63,6 +63,10 @@ url = "https://status.claude.com/history.atom"
 [[feeds]]
 name = "DeepSeek"
 url = "https://status.deepseek.com/feed.atom"
+
+[[feeds]]
+name = "Moonshot AI"
+url = "https://status.moonshot.cn/history.atom"
 ```
 
 ### Fields

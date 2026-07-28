@@ -51,7 +51,7 @@ pub struct Config {
     pub feeds: Vec<Feed>,
 }
 
-/// The built-in default configuration (three default feeds).
+/// The built-in default configuration (four default feeds).
 pub fn default_config() -> Config {
     Config {
         poll_interval_secs: default_poll_interval_secs(),
@@ -70,6 +70,10 @@ pub fn default_config() -> Config {
             Feed {
                 name: "DeepSeek".to_string(),
                 url: "https://status.deepseek.com/feed.atom".to_string(),
+            },
+            Feed {
+                name: "Moonshot AI".to_string(),
+                url: "https://status.moonshot.cn/history.atom".to_string(),
             },
         ],
     }
@@ -162,6 +166,18 @@ mod tests {
         let serialized = toml::to_string_pretty(&config).expect("serialize");
         let parsed: Config = toml::from_str(&serialized).expect("parse");
         assert_eq!(config, parsed);
+    }
+
+    #[test]
+    fn default_config_includes_moonshot() {
+        let config = default_config();
+        assert!(
+            config.feeds.iter().any(|f| {
+                f.name == "Moonshot AI" && f.url == "https://status.moonshot.cn/history.atom"
+            }),
+            "default config must include the Moonshot AI feed: {:#?}",
+            config.feeds
+        );
     }
 
     #[test]

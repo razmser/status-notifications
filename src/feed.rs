@@ -420,8 +420,8 @@ const DETAIL_MAX_CHARS: usize = 200;
 ///
 /// # Known limitations (non-default feeds only)
 ///
-/// The three default feeds (Statuspage, Instatus, FlashDuty) are unaffected by
-/// these; they are residual graceful-degradation edges for arbitrary user feeds:
+/// The default feeds (Statuspage, Instatus, FlashDuty) are unaffected by these;
+/// they are residual graceful-degradation edges for arbitrary user feeds:
 ///
 /// - A multi-paragraph message whose *later* paragraph happens to begin with a
 ///   status-keyword word (so that paragraph parses as an update header) is
